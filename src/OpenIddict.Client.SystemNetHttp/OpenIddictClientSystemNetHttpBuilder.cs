@@ -5,6 +5,8 @@
  */
 
 using System.ComponentModel;
+using System.Net.Http.Headers;
+using System.Reflection;
 using OpenIddict.Client.SystemNetHttp;
 using Polly;
 
@@ -13,7 +15,7 @@ namespace Microsoft.Extensions.DependencyInjection;
 /// <summary>
 /// Exposes the necessary methods required to configure the OpenIddict client/System.Net.Http integration.
 /// </summary>
-public class OpenIddictClientSystemNetHttpBuilder
+public sealed class OpenIddictClientSystemNetHttpBuilder
 {
     /// <summary>
     /// Initializes a new instance of <see cref="OpenIddictClientBuilder"/>.
@@ -33,7 +35,7 @@ public class OpenIddictClientSystemNetHttpBuilder
     /// </summary>
     /// <param name="configuration">The delegate used to configure the OpenIddict options.</param>
     /// <remarks>This extension can be safely called multiple times.</remarks>
-    /// <returns>The <see cref="OpenIddictClientSystemNetHttpBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientSystemNetHttpBuilder"/> instance.</returns>
     public OpenIddictClientSystemNetHttpBuilder Configure(Action<OpenIddictClientSystemNetHttpOptions> configuration)
     {
         if (configuration is null)
@@ -50,29 +52,78 @@ public class OpenIddictClientSystemNetHttpBuilder
     /// Replaces the default HTTP error policy used by the OpenIddict client services.
     /// </summary>
     /// <param name="policy">The HTTP Polly error policy.</param>
-    /// <returns>The <see cref="OpenIddictClientSystemNetHttpBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientSystemNetHttpBuilder"/> instance.</returns>
     public OpenIddictClientSystemNetHttpBuilder SetHttpErrorPolicy(IAsyncPolicy<HttpResponseMessage> policy)
-        => Configure(options => options.HttpErrorPolicy = policy);
+    {
+        if (policy is null)
+        {
+            throw new ArgumentNullException(nameof(policy));
+        }
+
+        return Configure(options => options.HttpErrorPolicy = policy);
+    }
 
     /// <summary>
-    /// Determines whether the specified object is equal to the current object.
+    /// Sets the product information used in the user agent header that is attached
+    /// to the backchannel HTTP requests sent to the authorization server.
     /// </summary>
-    /// <param name="obj">The object to compare with the current object.</param>
-    /// <returns><see langword="true"/> if the specified object is equal to the current object; otherwise, false.</returns>
+    /// <param name="information">The product information.</param>
+    /// <returns>The <see cref="OpenIddictClientSystemNetHttpBuilder"/> instance.</returns>
+    public OpenIddictClientSystemNetHttpBuilder SetProductInformation(ProductInfoHeaderValue information)
+    {
+        if (information is null)
+        {
+            throw new ArgumentNullException(nameof(information));
+        }
+
+        return Configure(options => options.ProductInformation = information);
+    }
+
+    /// <summary>
+    /// Sets the product information used in the user agent header that is attached
+    /// to the backchannel HTTP requests sent to the authorization server.
+    /// </summary>
+    /// <param name="name">The product name.</param>
+    /// <param name="version">The product version.</param>
+    /// <returns>The <see cref="OpenIddictClientSystemNetHttpBuilder"/> instance.</returns>
+    public OpenIddictClientSystemNetHttpBuilder SetProductInformation(string name, string? version)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            throw new ArgumentException(SR.GetResourceString(SR.ID0345), nameof(name));
+        }
+
+        return SetProductInformation(new ProductInfoHeaderValue(name, version));
+    }
+
+    /// <summary>
+    /// Sets the product information used in the user agent header that is attached
+    /// to the backchannel HTTP requests sent to the authorization server based
+    /// on the identity of the specified .NET assembly (name and version).
+    /// </summary>
+    /// <param name="assembly">The assembly from which the product information is created.</param>
+    /// <returns>The <see cref="OpenIddictClientSystemNetHttpBuilder"/> instance.</returns>
+    public OpenIddictClientSystemNetHttpBuilder SetProductInformation(Assembly assembly)
+    {
+        if (assembly is null)
+        {
+            throw new ArgumentNullException(nameof(assembly));
+        }
+
+        return SetProductInformation(new ProductInfoHeaderValue(
+            productName: assembly.GetName().Name!,
+            productVersion: assembly.GetName().Version!.ToString()));
+    }
+
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override bool Equals(object? obj) => base.Equals(obj);
 
-    /// <summary>
-    /// Serves as the default hash function.
-    /// </summary>
-    /// <returns>A hash code for the current object.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override int GetHashCode() => base.GetHashCode();
 
-    /// <summary>
-    /// Returns a string that represents the current object.
-    /// </summary>
-    /// <returns>A string that represents the current object.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override string? ToString() => base.ToString();
 }

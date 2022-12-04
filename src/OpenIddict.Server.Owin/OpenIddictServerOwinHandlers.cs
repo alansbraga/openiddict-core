@@ -8,7 +8,6 @@ using System.Collections.Immutable;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
-using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -34,18 +33,18 @@ public static partial class OpenIddictServerOwinHandlers
         /*
          * Challenge processing:
          */
+        ResolveHostChallengeProperties.Descriptor,
         AttachHostChallengeError.Descriptor,
-        ResolveHostChallengeParameters.Descriptor,
 
         /*
          * Sign-in processing:
          */
-        ResolveHostSignInParameters.Descriptor,
+        ResolveHostSignInProperties.Descriptor,
 
         /*
          * Sign-out processing:
          */
-        ResolveHostSignOutParameters.Descriptor)
+        ResolveHostSignOutProperties.Descriptor)
         .AddRange(Authentication.DefaultHandlers)
         .AddRange(Device.DefaultHandlers)
         .AddRange(Discovery.DefaultHandlers)
@@ -59,7 +58,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for inferring the endpoint type from the request address.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class InferEndpointType : IOpenIddictServerHandler<ProcessRequestContext>
+    public sealed class InferEndpointType : IOpenIddictServerHandler<ProcessRequestContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -164,7 +163,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for infering the issuer URL from the HTTP request host and validating it.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class InferIssuerFromHost : IOpenIddictServerHandler<ProcessRequestContext>
+    public sealed class InferIssuerFromHost : IOpenIddictServerHandler<ProcessRequestContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -228,7 +227,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for rejecting OpenID Connect requests that don't use transport security.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ValidateTransportSecurityRequirement : IOpenIddictServerHandler<ProcessRequestContext>
+    public sealed class ValidateTransportSecurityRequirement : IOpenIddictServerHandler<ProcessRequestContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -261,7 +260,6 @@ public static partial class OpenIddictServerOwinHandlers
                 return default;
             }
 
-            // Reject authorization requests sent without transport security.
             if (!request.IsSecure)
             {
                 context.Reject(
@@ -277,10 +275,89 @@ public static partial class OpenIddictServerOwinHandlers
     }
 
     /// <summary>
+    /// Contains the logic responsible for resolving the context-specific properties and parameters stored in the
+    /// OWIN authentication properties specified by the application that triggered the challenge operation.
+    /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
+    /// </summary>
+    public sealed class ResolveHostChallengeProperties : IOpenIddictServerHandler<ProcessChallengeContext>
+    {
+        /// <summary>
+        /// Gets the default descriptor definition assigned to this handler.
+        /// </summary>
+        public static OpenIddictServerHandlerDescriptor Descriptor { get; }
+            = OpenIddictServerHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
+                .AddFilter<RequireOwinRequest>()
+                .UseSingletonHandler<ResolveHostChallengeProperties>()
+                .SetOrder(ValidateChallengeDemand.Descriptor.Order - 500)
+                .SetType(OpenIddictServerHandlerType.BuiltIn)
+                .Build();
+
+        /// <inheritdoc/>
+        public ValueTask HandleAsync(ProcessChallengeContext context)
+        {
+            if (context is null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            var properties = context.Transaction.GetProperty<AuthenticationProperties>(typeof(AuthenticationProperties).FullName!);
+            if (properties is not { Dictionary.Count: > 0 })
+            {
+                return default;
+            }
+
+            // Note: unlike ASP.NET Core, OWIN's AuthenticationProperties doesn't offer a strongly-typed
+            // dictionary that allows flowing parameters while preserving their original types. To allow
+            // returning custom parameters, the OWIN host allows using AuthenticationProperties.Dictionary
+            // but requires suffixing the properties that are meant to be used as parameters using a special
+            // suffix that indicates that the property is public and determines its actual representation.
+            foreach (var property in properties.Dictionary)
+            {
+                var (name, value) = property.Key switch
+                {
+                    // If the property ends with #string, represent it as a string parameter.
+                    string key when key.EndsWith(PropertyTypes.String, StringComparison.OrdinalIgnoreCase) => (
+                        Name: key[..^PropertyTypes.String.Length],
+                        Value: new OpenIddictParameter(property.Value)),
+
+                    // If the property ends with #boolean, return it as a boolean parameter.
+                    string key when key.EndsWith(PropertyTypes.Boolean, StringComparison.OrdinalIgnoreCase) => (
+                        Name: key[..^PropertyTypes.Boolean.Length],
+                        Value: new OpenIddictParameter(bool.Parse(property.Value))),
+
+                    // If the property ends with #integer, return it as an integer parameter.
+                    string key when key.EndsWith(PropertyTypes.Integer, StringComparison.OrdinalIgnoreCase) => (
+                        Name: key[..^PropertyTypes.Integer.Length],
+                        Value: new OpenIddictParameter(long.Parse(property.Value, CultureInfo.InvariantCulture))),
+
+                    // If the property ends with #json, return it as a JSON parameter.
+                    string key when key.EndsWith(PropertyTypes.Json, StringComparison.OrdinalIgnoreCase) => (
+                        Name: key[..^PropertyTypes.Json.Length],
+                        Value: new OpenIddictParameter(JsonSerializer.Deserialize<JsonElement>(property.Value))),
+
+                    _ => default
+                };
+
+                if (!string.IsNullOrEmpty(name))
+                {
+                    context.Parameters[name] = value;
+                }
+
+                else
+                {
+                    context.Properties[property.Key] = property.Value;
+                }
+            }
+
+            return default;
+        }
+    }
+
+    /// <summary>
     /// Contains the logic responsible for attaching the error details using the OWIN authentication properties.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class AttachHostChallengeError : IOpenIddictServerHandler<ProcessChallengeContext>
+    public sealed class AttachHostChallengeError : IOpenIddictServerHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -318,85 +395,11 @@ public static partial class OpenIddictServerOwinHandlers
     }
 
     /// <summary>
-    /// Contains the logic responsible for resolving the additional challenge parameters stored in the
+    /// Contains the logic responsible for resolving the context-specific properties and parameters stored in the
     /// OWIN authentication properties specified by the application that triggered the sign-in operation.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ResolveHostChallengeParameters : IOpenIddictServerHandler<ProcessChallengeContext>
-    {
-        /// <summary>
-        /// Gets the default descriptor definition assigned to this handler.
-        /// </summary>
-        public static OpenIddictServerHandlerDescriptor Descriptor { get; }
-            = OpenIddictServerHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
-                .AddFilter<RequireOwinRequest>()
-                .UseSingletonHandler<ResolveHostChallengeParameters>()
-                .SetOrder(AttachCustomChallengeParameters.Descriptor.Order - 500)
-                .SetType(OpenIddictServerHandlerType.BuiltIn)
-                .Build();
-
-        /// <inheritdoc/>
-        public ValueTask HandleAsync(ProcessChallengeContext context)
-        {
-            if (context is null)
-            {
-                throw new ArgumentNullException(nameof(context));
-            }
-
-            var properties = context.Transaction.GetProperty<AuthenticationProperties>(typeof(AuthenticationProperties).FullName!);
-            if (properties is null)
-            {
-                return default;
-            }
-
-            // Note: unlike ASP.NET Core, Owin's AuthenticationProperties doesn't offer a strongly-typed
-            // dictionary that allows flowing parameters while preserving their original types. To allow
-            // returning custom parameters, the OWIN host allows using AuthenticationProperties.Dictionary
-            // but requires suffixing the properties that are meant to be used as parameters using a special
-            // suffix that indicates that the property is public and determines its actual representation.
-            foreach (var property in properties.Dictionary)
-            {
-                var (name, value) = property.Key switch
-                {
-                    // If the property ends with #string, represent it as a string parameter.
-                    string key when key.EndsWith(PropertyTypes.String, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.String.Length),
-                        Value: new OpenIddictParameter(property.Value)),
-
-                    // If the property ends with #boolean, return it as a boolean parameter.
-                    string key when key.EndsWith(PropertyTypes.Boolean, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Boolean.Length),
-                        Value: new OpenIddictParameter(bool.Parse(property.Value))),
-
-                    // If the property ends with #integer, return it as an integer parameter.
-                    string key when key.EndsWith(PropertyTypes.Integer, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Integer.Length),
-                        Value: new OpenIddictParameter(long.Parse(property.Value, CultureInfo.InvariantCulture))),
-
-                    // If the property ends with #json, return it as a JSON parameter.
-                    string key when key.EndsWith(PropertyTypes.Json, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Json.Length),
-                        Value: new OpenIddictParameter(JsonSerializer.Deserialize<JsonElement>(property.Value))),
-
-                    _ => default
-                };
-
-                if (!string.IsNullOrEmpty(name))
-                {
-                    context.Parameters[name] = value;
-                }
-            }
-
-            return default;
-        }
-    }
-
-    /// <summary>
-    /// Contains the logic responsible for resolving the additional sign-in parameters stored in the
-    /// OWIN authentication properties specified by the application that triggered the sign-in operation.
-    /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
-    /// </summary>
-    public class ResolveHostSignInParameters : IOpenIddictServerHandler<ProcessSignInContext>
+    public sealed class ResolveHostSignInProperties : IOpenIddictServerHandler<ProcessSignInContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -404,8 +407,8 @@ public static partial class OpenIddictServerOwinHandlers
         public static OpenIddictServerHandlerDescriptor Descriptor { get; }
             = OpenIddictServerHandlerDescriptor.CreateBuilder<ProcessSignInContext>()
                 .AddFilter<RequireOwinRequest>()
-                .UseSingletonHandler<ResolveHostSignInParameters>()
-                .SetOrder(AttachCustomSignInParameters.Descriptor.Order - 500)
+                .UseSingletonHandler<ResolveHostSignInProperties>()
+                .SetOrder(ValidateSignInDemand.Descriptor.Order - 500)
                 .SetType(OpenIddictServerHandlerType.BuiltIn)
                 .Build();
 
@@ -417,21 +420,13 @@ public static partial class OpenIddictServerOwinHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
-            Debug.Assert(context.Principal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
-
             var properties = context.Transaction.GetProperty<AuthenticationProperties>(typeof(AuthenticationProperties).FullName!);
-            if (properties is null)
+            if (properties is not { Dictionary.Count: > 0 })
             {
                 return default;
             }
 
-            // Preserve the host properties in the principal.
-            if (properties.Dictionary.Count is not 0)
-            {
-                context.Principal.SetClaim(Claims.Private.HostProperties, properties.Dictionary);
-            }
-
-            // Note: unlike ASP.NET Core, Owin's AuthenticationProperties doesn't offer a strongly-typed
+            // Note: unlike ASP.NET Core, OWIN's AuthenticationProperties doesn't offer a strongly-typed
             // dictionary that allows flowing parameters while preserving their original types. To allow
             // returning custom parameters, the OWIN host allows using AuthenticationProperties.Dictionary
             // but requires suffixing the properties that are meant to be used as parameters using a special
@@ -442,22 +437,22 @@ public static partial class OpenIddictServerOwinHandlers
                 {
                     // If the property ends with #string, represent it as a string parameter.
                     string key when key.EndsWith(PropertyTypes.String, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.String.Length),
+                        Name: key[..^PropertyTypes.String.Length],
                         Value: new OpenIddictParameter(property.Value)),
 
                     // If the property ends with #boolean, return it as a boolean parameter.
                     string key when key.EndsWith(PropertyTypes.Boolean, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Boolean.Length),
+                        Name: key[..^PropertyTypes.Boolean.Length],
                         Value: new OpenIddictParameter(bool.Parse(property.Value))),
 
                     // If the property ends with #integer, return it as an integer parameter.
                     string key when key.EndsWith(PropertyTypes.Integer, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Integer.Length),
+                        Name: key[..^PropertyTypes.Integer.Length],
                         Value: new OpenIddictParameter(long.Parse(property.Value, CultureInfo.InvariantCulture))),
 
                     // If the property ends with #json, return it as a JSON parameter.
                     string key when key.EndsWith(PropertyTypes.Json, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Json.Length),
+                        Name: key[..^PropertyTypes.Json.Length],
                         Value: new OpenIddictParameter(JsonSerializer.Deserialize<JsonElement>(property.Value))),
 
                     _ => default
@@ -467,6 +462,11 @@ public static partial class OpenIddictServerOwinHandlers
                 {
                     context.Parameters[name] = value;
                 }
+
+                else
+                {
+                    context.Properties[property.Key] = property.Value;
+                }
             }
 
             return default;
@@ -474,11 +474,11 @@ public static partial class OpenIddictServerOwinHandlers
     }
 
     /// <summary>
-    /// Contains the logic responsible for resolving the additional sign-out parameters stored in the
+    /// Contains the logic responsible for resolving the context-specific properties and parameters stored in the
     /// OWIN authentication properties specified by the application that triggered the sign-out operation.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ResolveHostSignOutParameters : IOpenIddictServerHandler<ProcessSignOutContext>
+    public sealed class ResolveHostSignOutProperties : IOpenIddictServerHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -486,8 +486,8 @@ public static partial class OpenIddictServerOwinHandlers
         public static OpenIddictServerHandlerDescriptor Descriptor { get; }
             = OpenIddictServerHandlerDescriptor.CreateBuilder<ProcessSignOutContext>()
                 .AddFilter<RequireOwinRequest>()
-                .UseSingletonHandler<ResolveHostSignOutParameters>()
-                .SetOrder(AttachCustomSignOutParameters.Descriptor.Order - 500)
+                .UseSingletonHandler<ResolveHostSignOutProperties>()
+                .SetOrder(ValidateSignOutDemand.Descriptor.Order - 500)
                 .SetType(OpenIddictServerHandlerType.BuiltIn)
                 .Build();
 
@@ -500,12 +500,12 @@ public static partial class OpenIddictServerOwinHandlers
             }
 
             var properties = context.Transaction.GetProperty<AuthenticationProperties>(typeof(AuthenticationProperties).FullName!);
-            if (properties is null)
+            if (properties is not { Dictionary.Count: > 0 })
             {
                 return default;
             }
 
-            // Note: unlike ASP.NET Core, Owin's AuthenticationProperties doesn't offer a strongly-typed
+            // Note: unlike ASP.NET Core, OWIN's AuthenticationProperties doesn't offer a strongly-typed
             // dictionary that allows flowing parameters while preserving their original types. To allow
             // returning custom parameters, the OWIN host allows using AuthenticationProperties.Dictionary
             // but requires suffixing the properties that are meant to be used as parameters using a special
@@ -516,22 +516,22 @@ public static partial class OpenIddictServerOwinHandlers
                 {
                     // If the property ends with #string, represent it as a string parameter.
                     string key when key.EndsWith(PropertyTypes.String, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.String.Length),
+                        Name: key[..^PropertyTypes.String.Length],
                         Value: new OpenIddictParameter(property.Value)),
 
                     // If the property ends with #boolean, return it as a boolean parameter.
                     string key when key.EndsWith(PropertyTypes.Boolean, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Boolean.Length),
+                        Name: key[..^PropertyTypes.Boolean.Length],
                         Value: new OpenIddictParameter(bool.Parse(property.Value))),
 
                     // If the property ends with #integer, return it as an integer parameter.
                     string key when key.EndsWith(PropertyTypes.Integer, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Integer.Length),
+                        Name: key[..^PropertyTypes.Integer.Length],
                         Value: new OpenIddictParameter(long.Parse(property.Value, CultureInfo.InvariantCulture))),
 
                     // If the property ends with #json, return it as a JSON parameter.
                     string key when key.EndsWith(PropertyTypes.Json, StringComparison.OrdinalIgnoreCase) => (
-                        Name: key.Substring(0, key.Length - PropertyTypes.Json.Length),
+                        Name: key[..^PropertyTypes.Json.Length],
                         Value: new OpenIddictParameter(JsonSerializer.Deserialize<JsonElement>(property.Value))),
 
                     _ => default
@@ -540,6 +540,11 @@ public static partial class OpenIddictServerOwinHandlers
                 if (!string.IsNullOrEmpty(name))
                 {
                     context.Parameters[name] = value;
+                }
+
+                else
+                {
+                    context.Properties[property.Key] = property.Value;
                 }
             }
 
@@ -551,7 +556,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for extracting OpenID Connect requests from GET HTTP requests.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ExtractGetRequest<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseValidatingContext
+    public sealed class ExtractGetRequest<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseValidatingContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -602,7 +607,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for extracting OpenID Connect requests from GET or POST HTTP requests.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ExtractGetOrPostRequest<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseValidatingContext
+    public sealed class ExtractGetOrPostRequest<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseValidatingContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -682,7 +687,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for extracting OpenID Connect requests from POST HTTP requests.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ExtractPostRequest<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseValidatingContext
+    public sealed class ExtractPostRequest<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseValidatingContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -757,7 +762,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for extracting client credentials from the standard HTTP Authorization header.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ExtractBasicAuthenticationCredentials<TContext> : IOpenIddictServerHandler<TContext>
+    public sealed class ExtractBasicAuthenticationCredentials<TContext> : IOpenIddictServerHandler<TContext>
         where TContext : BaseValidatingContext
     {
         /// <summary>
@@ -809,7 +814,7 @@ public static partial class OpenIddictServerOwinHandlers
 
             try
             {
-                var value = header.Substring("Basic ".Length).Trim();
+                var value = header["Basic ".Length..].Trim();
                 var data = Encoding.ASCII.GetString(Convert.FromBase64String(value));
 
                 var index = data.IndexOf(':');
@@ -824,8 +829,8 @@ public static partial class OpenIddictServerOwinHandlers
                 }
 
                 // Attach the basic authentication credentials to the request message.
-                context.Transaction.Request.ClientId = UnescapeDataString(data.Substring(0, index));
-                context.Transaction.Request.ClientSecret = UnescapeDataString(data.Substring(index + 1));
+                context.Transaction.Request.ClientId = UnescapeDataString(data[..index]);
+                context.Transaction.Request.ClientSecret = UnescapeDataString(data[(index + 1)..]);
 
                 return default;
             }
@@ -856,7 +861,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for extracting an access token from the standard HTTP Authorization header.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ExtractAccessToken<TContext> : IOpenIddictServerHandler<TContext>
+    public sealed class ExtractAccessToken<TContext> : IOpenIddictServerHandler<TContext>
         where TContext : BaseValidatingContext
     {
         /// <summary>
@@ -892,7 +897,7 @@ public static partial class OpenIddictServerOwinHandlers
             }
 
             // Attach the access token to the request message.
-            context.Transaction.Request.AccessToken = header.Substring("Bearer ".Length);
+            context.Transaction.Request.AccessToken = header["Bearer ".Length..];
 
             return default;
         }
@@ -902,7 +907,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for enabling the pass-through mode for the received request.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class EnablePassthroughMode<TContext, TFilter> : IOpenIddictServerHandler<TContext>
+    public sealed class EnablePassthroughMode<TContext, TFilter> : IOpenIddictServerHandler<TContext>
         where TContext : BaseRequestContext
         where TFilter : IOpenIddictServerHandlerFilter<TContext>
     {
@@ -936,7 +941,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for attaching an appropriate HTTP status code.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class AttachHttpResponseCode<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+    public sealed class AttachHttpResponseCode<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -998,7 +1003,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for attaching an OWIN response chalenge to the context, if necessary.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class AttachOwinResponseChallenge<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+    public sealed class AttachOwinResponseChallenge<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1050,7 +1055,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for suppressing the redirection applied by FormsAuthenticationModule, if necessary.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class SuppressFormsAuthenticationRedirect<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+    public sealed class SuppressFormsAuthenticationRedirect<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1117,7 +1122,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for attaching the appropriate HTTP response cache headers.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class AttachCacheControlHeader<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+    public sealed class AttachCacheControlHeader<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1156,7 +1161,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for attaching errors details to the WWW-Authenticate header.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class AttachWwwAuthenticateHeader<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+    public sealed class AttachWwwAuthenticateHeader<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
     {
         private readonly IOptionsMonitor<OpenIddictServerOwinOptions> _options;
 
@@ -1263,7 +1268,7 @@ public static partial class OpenIddictServerOwinHandlers
             }
 
             // If the WWW-Authenticate header ends with a comma, remove it.
-            if (builder[builder.Length - 1] == ',')
+            if (builder[^1] == ',')
             {
                 builder.Remove(builder.Length - 1, 1);
             }
@@ -1278,7 +1283,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for processing challenge responses that contain a WWW-Authenticate header.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ProcessChallengeErrorResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+    public sealed class ProcessChallengeErrorResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1321,7 +1326,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for processing OpenID Connect responses that must be returned as JSON.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ProcessJsonResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+    public sealed class ProcessJsonResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1376,7 +1381,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// middleware in the pipeline at a later stage (e.g an ASP.NET MVC action or a NancyFX module).
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ProcessPassthroughErrorResponse<TContext, TFilter> : IOpenIddictServerHandler<TContext>
+    public sealed class ProcessPassthroughErrorResponse<TContext, TFilter> : IOpenIddictServerHandler<TContext>
         where TContext : BaseRequestContext
         where TFilter : IOpenIddictServerHandlerFilter<TContext>
     {
@@ -1421,7 +1426,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for processing OpenID Connect responses that must be returned as plain-text.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ProcessLocalErrorResponse<TContext> : IOpenIddictServerHandler<TContext>
+    public sealed class ProcessLocalErrorResponse<TContext> : IOpenIddictServerHandler<TContext>
         where TContext : BaseRequestContext
     {
         /// <summary>
@@ -1495,7 +1500,7 @@ public static partial class OpenIddictServerOwinHandlers
     /// Contains the logic responsible for processing OpenID Connect responses that don't specify any parameter.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by OWIN.
     /// </summary>
-    public class ProcessEmptyResponse<TContext> : IOpenIddictServerHandler<TContext>
+    public sealed class ProcessEmptyResponse<TContext> : IOpenIddictServerHandler<TContext>
         where TContext : BaseRequestContext
     {
         /// <summary>

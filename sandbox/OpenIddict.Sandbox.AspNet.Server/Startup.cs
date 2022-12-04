@@ -97,6 +97,34 @@ namespace OpenIddict.Sandbox.AspNet.Server
                         }
                     });
                 }
+
+                if (await manager.FindByClientIdAsync("postman") is null)
+                {
+                    await manager.CreateAsync(new OpenIddictApplicationDescriptor
+                    {
+                        ClientId = "postman",
+                        ConsentType = ConsentTypes.Systematic,
+                        DisplayName = "Postman",
+                        RedirectUris =
+                        {
+                            new Uri("https://oauth.pstmn.io/v1/callback")
+                        },
+                        Permissions =
+                        {
+                            Permissions.Endpoints.Authorization,
+                            Permissions.Endpoints.Device,
+                            Permissions.Endpoints.Token,
+                            Permissions.GrantTypes.AuthorizationCode,
+                            Permissions.GrantTypes.DeviceCode,
+                            Permissions.GrantTypes.Password,
+                            Permissions.GrantTypes.RefreshToken,
+                            Permissions.ResponseTypes.Code,
+                            Permissions.Scopes.Email,
+                            Permissions.Scopes.Profile,
+                            Permissions.Scopes.Roles
+                        }
+                    });
+                }
             }).GetAwaiter().GetResult();
         }
 
@@ -131,6 +159,9 @@ namespace OpenIddict.Sandbox.AspNet.Server
                     // see https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#section-4.4.
                     options.SetRedirectionEndpointUris("/callback/login/github");
 
+                    // Note: this sample uses the code flow, but you can enable the other flows if necessary.
+                    options.AllowAuthorizationCodeFlow();
+
                     // Register the signing and encryption credentials used to protect
                     // sensitive data like the state tokens produced by OpenIddict.
                     options.AddDevelopmentEncryptionCertificate()
@@ -140,16 +171,19 @@ namespace OpenIddict.Sandbox.AspNet.Server
                     options.UseOwin()
                            .EnableRedirectionEndpointPassthrough();
 
-                    // Register the System.Net.Http integration.
-                    options.UseSystemNetHttp();
+                    // Register the System.Net.Http integration and use the identity of the current
+                    // assembly as a more specific user agent, which can be useful when dealing with
+                    // providers that use the user agent as a way to throttle requests (e.g Reddit).
+                    options.UseSystemNetHttp()
+                           .SetProductInformation(typeof(Startup).Assembly);
 
                     // Register the Web providers integrations.
                     options.UseWebProviders()
-                           .AddGitHub(new()
+                           .UseGitHub(options =>
                            {
-                               ClientId = "c4ade52327b01ddacff3",
-                               ClientSecret = "da6bed851b75e317bf6b2cb67013679d9467c122",
-                               RedirectUri = new Uri("https://localhost:44349/callback/login/github", UriKind.Absolute)
+                               options.SetClientId("c4ade52327b01ddacff3")
+                                      .SetClientSecret("da6bed851b75e317bf6b2cb67013679d9467c122")
+                                      .SetRedirectUri("https://localhost:44349/callback/login/github");
                            });
                 })
 

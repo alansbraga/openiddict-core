@@ -161,7 +161,7 @@ public class OpenIddictEntityFrameworkScopeStore<TScope, TContext, TKey> : IOpen
     public virtual IAsyncEnumerable<TScope> FindByNamesAsync(
         ImmutableArray<string> names, CancellationToken cancellationToken)
     {
-        if (names.Any(name => string.IsNullOrEmpty(name)))
+        if (names.Any(string.IsNullOrEmpty))
         {
             throw new ArgumentException(SR.GetResourceString(SR.ID0203), nameof(names));
         }
@@ -267,7 +267,7 @@ public class OpenIddictEntityFrameworkScopeStore<TScope, TContext, TKey> : IOpen
             }
 
             return builder.ToImmutable();
-        });
+        })!;
 
         return new(descriptions);
     }
@@ -319,7 +319,7 @@ public class OpenIddictEntityFrameworkScopeStore<TScope, TContext, TKey> : IOpen
             }
 
             return builder.ToImmutable();
-        });
+        })!;
 
         return new(names);
     }
@@ -376,7 +376,7 @@ public class OpenIddictEntityFrameworkScopeStore<TScope, TContext, TKey> : IOpen
             }
 
             return builder.ToImmutable();
-        });
+        })!;
 
         return new(properties);
     }

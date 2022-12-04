@@ -4,6 +4,7 @@
  * the license and the contributors participating to this project.
  */
 
+using System.ComponentModel;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
@@ -12,7 +13,7 @@ namespace OpenIddict.Client;
 /// <summary>
 /// Provides various settings needed to configure the OpenIddict client handler.
 /// </summary>
-public class OpenIddictClientOptions
+public sealed class OpenIddictClientOptions
 {
     /// <summary>
     /// Gets the list of the handlers responsible for processing the OpenIddict client operations.
@@ -117,4 +118,27 @@ public class OpenIddictClientOptions
     /// as it prevents the tokens from being revoked (if needed).
     /// </summary>
     public bool DisableTokenStorage { get; set; }
+
+    /// <summary>
+    /// Gets the OAuth 2.0 code challenge methods enabled for this application.
+    /// By default, only the S256 method is allowed (if the code flow is enabled).
+    /// </summary>
+    public HashSet<string> CodeChallengeMethods { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Gets the OAuth 2.0/OpenID Connect flows enabled for this application.
+    /// </summary>
+    public HashSet<string> GrantTypes { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Gets the OAuth 2.0/OpenID Connect response types enabled for this application.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Advanced)]
+    public HashSet<string> ResponseTypes { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Gets the OAuth 2.0/OpenID Connect response modes enabled for this application.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Advanced)]
+    public HashSet<string> ResponseModes { get; } = new(StringComparer.Ordinal);
 }

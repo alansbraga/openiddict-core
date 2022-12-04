@@ -137,6 +137,48 @@ public partial class OpenIddictServerAspNetCoreIntegrationTests : OpenIddictServ
     }
 
     [Fact]
+    public async Task ProcessChallenge_ImportsAuthenticationProperties()
+    {
+        // Arrange
+        await using var server = await CreateServerAsync(options =>
+        {
+            options.EnableDegradedMode();
+            options.SetTokenEndpointUris("/challenge/custom");
+
+            options.AddEventHandler<HandleTokenRequestContext>(builder =>
+                builder.UseInlineHandler(context =>
+                {
+                    context.SkipRequest();
+
+                    return default;
+                }));
+
+            options.AddEventHandler<ProcessChallengeContext>(builder =>
+                builder.UseInlineHandler(context =>
+                {
+                    Assert.Equal("value", context.Properties["custom_property"]);
+
+                    return default;
+                }));
+        });
+
+        await using var client = await server.CreateClientAsync();
+
+        // Act
+        var response = await client.PostAsync("/challenge/custom", new OpenIddictRequest
+        {
+            GrantType = GrantTypes.Password,
+            Username = "johndoe",
+            Password = "A3ddj3w"
+        });
+
+        // Assert
+        Assert.NotNull(response.Error);
+        Assert.NotNull(response.ErrorDescription);
+        Assert.NotNull(response.ErrorUri);
+    }
+
+    [Fact]
     public async Task ProcessChallenge_ReturnsParametersFromAuthenticationProperties()
     {
         // Arrange
@@ -735,6 +777,46 @@ public partial class OpenIddictServerAspNetCoreIntegrationTests : OpenIddictServ
     }
 
     [Fact]
+    public async Task ProcessSignIn_ImportsAuthenticationProperties()
+    {
+        // Arrange
+        await using var server = await CreateServerAsync(options =>
+        {
+            options.EnableDegradedMode();
+            options.SetTokenEndpointUris("/signin/custom");
+
+            options.AddEventHandler<HandleTokenRequestContext>(builder =>
+                builder.UseInlineHandler(context =>
+                {
+                    context.SkipRequest();
+
+                    return default;
+                }));
+
+            options.AddEventHandler<ProcessSignInContext>(builder =>
+                builder.UseInlineHandler(context =>
+                {
+                    Assert.Equal("value", context.Properties["custom_property"]);
+
+                    return default;
+                }));
+        });
+
+        await using var client = await server.CreateClientAsync();
+
+        // Act
+        var response = await client.PostAsync("/signin/custom", new OpenIddictRequest
+        {
+            GrantType = GrantTypes.Password,
+            Username = "johndoe",
+            Password = "A3ddj3w"
+        });
+
+        // Assert
+        Assert.NotNull(response.AccessToken);
+    }
+
+    [Fact]
     public async Task ProcessSignIn_ReturnsParametersFromAuthenticationProperties()
     {
         // Arrange
@@ -783,6 +865,45 @@ public partial class OpenIddictServerAspNetCoreIntegrationTests : OpenIddictServ
     }
 
     [Fact]
+    public async Task ProcessSignOut_ImportsAuthenticationProperties()
+    {
+        // Arrange
+        await using var server = await CreateServerAsync(options =>
+        {
+            options.EnableDegradedMode();
+            options.SetLogoutEndpointUris("/signout/custom");
+
+            options.AddEventHandler<HandleLogoutRequestContext>(builder =>
+                builder.UseInlineHandler(context =>
+                {
+                    context.SkipRequest();
+
+                    return default;
+                }));
+
+            options.AddEventHandler<ProcessSignOutContext>(builder =>
+                builder.UseInlineHandler(context =>
+                {
+                    Assert.Equal("value", context.Properties["custom_property"]);
+
+                    return default;
+                }));
+        });
+
+        await using var client = await server.CreateClientAsync();
+
+        // Act
+        var response = await client.PostAsync("/signout/custom", new OpenIddictRequest
+        {
+            PostLogoutRedirectUri = "http://www.fabrikam.com/path",
+            State = "af0ifjsldkj"
+        });
+
+        // Assert
+        Assert.NotNull(response.State);
+    }
+
+    [Fact]
     public async Task ProcessSignOut_ReturnsParametersFromAuthenticationProperties()
     {
         // Arrange
@@ -815,8 +936,6 @@ public partial class OpenIddictServerAspNetCoreIntegrationTests : OpenIddictServ
         Assert.Equal("Bob l'Eponge", (string?) response["string_parameter"]);
     }
 
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-        Justification = "The caller is responsible for disposing the test server.")]
     protected override
 #if SUPPORTS_GENERIC_HOST
         async
@@ -904,7 +1023,10 @@ public partial class OpenIddictServerAspNetCoreIntegrationTests : OpenIddictServ
                     var principal = new ClaimsPrincipal(identity);
 
                     var properties = new AuthenticationProperties(
-                        items: new Dictionary<string, string?>(),
+                        items: new Dictionary<string, string?>
+                        {
+                            ["custom_property"] = "value"
+                        },
                         parameters: new Dictionary<string, object?>
                         {
                             ["boolean_parameter"] = true,
@@ -931,7 +1053,10 @@ public partial class OpenIddictServerAspNetCoreIntegrationTests : OpenIddictServ
                 else if (context.Request.Path == "/signout/custom")
                 {
                     var properties = new AuthenticationProperties(
-                        items: new Dictionary<string, string?>(),
+                        items: new Dictionary<string, string?>
+                        {
+                            ["custom_property"] = "value"
+                        },
                         parameters: new Dictionary<string, object?>
                         {
                             ["boolean_parameter"] = true,
@@ -956,7 +1081,9 @@ public partial class OpenIddictServerAspNetCoreIntegrationTests : OpenIddictServ
                         {
                             [OpenIddictServerAspNetCoreConstants.Properties.Error] = "custom_error",
                             [OpenIddictServerAspNetCoreConstants.Properties.ErrorDescription] = "custom_error_description",
-                            [OpenIddictServerAspNetCoreConstants.Properties.ErrorUri] = "custom_error_uri"
+                            [OpenIddictServerAspNetCoreConstants.Properties.ErrorUri] = "custom_error_uri",
+
+                            ["custom_property"] = "value"
                         },
                         parameters: new Dictionary<string, object?>
                         {

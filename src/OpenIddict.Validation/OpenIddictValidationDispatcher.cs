@@ -4,12 +4,14 @@
  * the license and the contributors participating to this project.
  */
 
+using System.ComponentModel;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace OpenIddict.Validation;
 
-public class OpenIddictValidationDispatcher : IOpenIddictValidationDispatcher
+[EditorBrowsable(EditorBrowsableState.Advanced)]
+public sealed class OpenIddictValidationDispatcher : IOpenIddictValidationDispatcher
 {
     private readonly ILogger<OpenIddictValidationDispatcher> _logger;
     private readonly IOptionsMonitor<OpenIddictValidationOptions> _options;
@@ -85,7 +87,7 @@ public class OpenIddictValidationDispatcher : IOpenIddictValidationDispatcher
         {
             // Note: the descriptors collection is sorted during options initialization for performance reasons.
             var descriptors = _options.CurrentValue.Handlers;
-            if (descriptors.Count == 0)
+            if (descriptors.Count is 0)
             {
                 yield break;
             }

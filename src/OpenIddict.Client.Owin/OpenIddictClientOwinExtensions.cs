@@ -21,7 +21,7 @@ public static class OpenIddictClientOwinExtensions
     /// </summary>
     /// <param name="builder">The services builder used by OpenIddict to register new services.</param>
     /// <remarks>This extension can be safely called multiple times.</remarks>
-    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/> instance.</returns>
     public static OpenIddictClientOwinBuilder UseOwin(this OpenIddictClientBuilder builder)
     {
         if (builder is null)
@@ -45,6 +45,7 @@ public static class OpenIddictClientOwinExtensions
         builder.Services.TryAddSingleton<RequireOwinRequest>();
         builder.Services.TryAddSingleton<RequirePostLogoutRedirectionEndpointPassthroughEnabled>();
         builder.Services.TryAddSingleton<RequireRedirectionEndpointPassthroughEnabled>();
+        builder.Services.TryAddSingleton<RequireTransportSecurityRequirementEnabled>();
 
         // Register the option initializer used by the OpenIddict OWIN client integration services.
         // Note: TryAddEnumerable() is used here to ensure the initializers are only registered once.
@@ -63,7 +64,7 @@ public static class OpenIddictClientOwinExtensions
     /// <param name="builder">The services builder used by OpenIddict to register new services.</param>
     /// <param name="configuration">The configuration delegate used to configure the client services.</param>
     /// <remarks>This extension can be safely called multiple times.</remarks>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public static OpenIddictClientBuilder UseOwin(
         this OpenIddictClientBuilder builder, Action<OpenIddictClientOwinBuilder> configuration)
     {

@@ -204,7 +204,7 @@ public static partial class OpenIddictServerEvents
     /// <summary>
     /// Represents an event called when processing an incoming request.
     /// </summary>
-    public class ProcessRequestContext : BaseValidatingContext
+    public sealed class ProcessRequestContext : BaseValidatingContext
     {
         /// <summary>
         /// Creates a new instance of the <see cref="ProcessRequestContext"/> class.
@@ -218,7 +218,7 @@ public static partial class OpenIddictServerEvents
     /// <summary>
     /// Represents an event called when processing an errored response.
     /// </summary>
-    public class ProcessErrorContext : BaseRequestContext
+    public sealed class ProcessErrorContext : BaseRequestContext
     {
         /// <summary>
         /// Creates a new instance of the <see cref="ProcessErrorContext"/> class.
@@ -270,7 +270,7 @@ public static partial class OpenIddictServerEvents
     /// <summary>
     /// Represents an event called when processing an authentication operation.
     /// </summary>
-    public class ProcessAuthenticationContext : BaseValidatingContext
+    public sealed class ProcessAuthenticationContext : BaseValidatingContext
     {
         /// <summary>
         /// Creates a new instance of the <see cref="ProcessAuthenticationContext"/> class.
@@ -536,7 +536,7 @@ public static partial class OpenIddictServerEvents
     /// <summary>
     /// Represents an event called when processing a challenge response.
     /// </summary>
-    public class ProcessChallengeContext : BaseValidatingContext
+    public sealed class ProcessChallengeContext : BaseValidatingContext
     {
         /// <summary>
         /// Creates a new instance of the <see cref="ProcessChallengeContext"/> class.
@@ -565,7 +565,12 @@ public static partial class OpenIddictServerEvents
         }
 
         /// <summary>
-        /// Gets the additional parameters returned to caller.
+        /// Gets the user-defined authentication properties, if available.
+        /// </summary>
+        public Dictionary<string, string?> Properties { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Gets the additional parameters returned to the caller.
         /// </summary>
         public Dictionary<string, OpenIddictParameter> Parameters { get; } = new(StringComparer.Ordinal);
     }
@@ -573,7 +578,7 @@ public static partial class OpenIddictServerEvents
     /// <summary>
     /// Represents an event called when processing a sign-in response.
     /// </summary>
-    public class ProcessSignInContext : BaseValidatingTicketContext
+    public sealed class ProcessSignInContext : BaseValidatingTicketContext
     {
         /// <summary>
         /// Creates a new instance of the <see cref="ProcessSignInContext"/> class.
@@ -602,7 +607,12 @@ public static partial class OpenIddictServerEvents
         }
 
         /// <summary>
-        /// Gets the additional parameters returned to caller.
+        /// Gets the user-defined authentication properties, if available.
+        /// </summary>
+        public Dictionary<string, string?> Properties { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Gets the additional parameters returned to the caller.
         /// </summary>
         public Dictionary<string, OpenIddictParameter> Parameters { get; } = new(StringComparer.Ordinal);
 
@@ -784,7 +794,7 @@ public static partial class OpenIddictServerEvents
     /// <summary>
     /// Represents an event called when processing a sign-out response.
     /// </summary>
-    public class ProcessSignOutContext : BaseValidatingContext
+    public sealed class ProcessSignOutContext : BaseValidatingContext
     {
         /// <summary>
         /// Creates a new instance of the <see cref="ProcessSignOutContext"/> class.
@@ -813,7 +823,12 @@ public static partial class OpenIddictServerEvents
         }
 
         /// <summary>
-        /// Gets the additional parameters returned to caller.
+        /// Gets the user-defined authentication properties, if available.
+        /// </summary>
+        public Dictionary<string, string?> Properties { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Gets the additional parameters returned to the caller.
         /// </summary>
         public Dictionary<string, OpenIddictParameter> Parameters { get; } = new(StringComparer.Ordinal);
     }

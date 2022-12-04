@@ -5,10 +5,9 @@
  */
 
 using System.Net.Http.Json;
-using System.Text;
-using System.Text.Encodings.Web;
 using AngleSharp.Html.Parser;
 using Microsoft.Extensions.Primitives;
+using OpenIddict.Extensions;
 
 namespace OpenIddict.Validation.IntegrationTests;
 
@@ -235,71 +234,28 @@ public class OpenIddictValidationIntegrationTestClient : IAsyncDisposable
 
     private HttpRequestMessage CreateRequestMessage(OpenIddictRequest request, HttpMethod method, Uri uri)
     {
-        // Note: a dictionary is deliberately not used here to allow multiple parameters with the
-        // same name to be specified. While initially not allowed by the core OAuth2 specification,
-        // this is required for derived drafts like the OAuth2 token exchange specification.
-        var parameters = new List<KeyValuePair<string?, string?>>();
-
-        foreach (var parameter in request.GetParameters())
+        if (!uri.IsAbsoluteUri)
         {
-            // If the parameter is null or empty, send an empty value.
-            if (OpenIddictParameter.IsNullOrEmpty(parameter.Value))
-            {
-                parameters.Add(new KeyValuePair<string?, string?>(parameter.Key, string.Empty));
-
-                continue;
-            }
-
-            var values = (string?[]?) parameter.Value;
-            if (values is not { Length: > 0 })
-            {
-                continue;
-            }
-
-            foreach (var value in values)
-            {
-                parameters.Add(new KeyValuePair<string?, string?>(parameter.Key, value));
-            }
-        }
-
-        if (method == HttpMethod.Get && parameters.Count != 0)
-        {
-            var builder = new StringBuilder();
-
-            foreach (var parameter in parameters)
-            {
-                if (string.IsNullOrEmpty(parameter.Key))
-                {
-                    continue;
-                }
-
-                if (builder.Length != 0)
-                {
-                    builder.Append('&');
-                }
-
-                builder.Append(UrlEncoder.Default.Encode(parameter.Key));
-
-                if (!string.IsNullOrEmpty(parameter.Value))
-                {
-                    builder.Append('=');
-                    builder.Append(UrlEncoder.Default.Encode(parameter.Value));
-                }
-            }
-
-            if (!uri.IsAbsoluteUri)
-            {
-                uri = new Uri(HttpClient.BaseAddress!, uri);
-            }
-
-            uri = new UriBuilder(uri) { Query = builder.ToString() }.Uri;
+            uri = new Uri(HttpClient.BaseAddress!, uri);
         }
 
         var message = new HttpRequestMessage(method, uri);
-
-        if (method != HttpMethod.Get)
+        if (message.Method == HttpMethod.Get && request.Count is not 0)
         {
-            message.Content = new FormUrlEncodedContent(parameters);
+            message.RequestUri = OpenIddictHelpers.AddQueryStringParameters(message.RequestUri!,
+                request.GetParameters().ToDictionary(
+                    parameter => parameter.Key,
+                    parameter => new StringValues((string?[]?) parameter.Value)));
+        }
+
+        if (message.Method != HttpMethod.Get)
+        {
+            message.Content = new FormUrlEncodedContent(
+                from parameter in request.GetParameters()
+                let values = (string?[]?) parameter.Value
+                where values is not null
+                from value in values
+                select new KeyValuePair<string?, string?>(parameter.Key, value));
         }
 
         return message;
@@ -380,19 +336,19 @@ public class OpenIddictValidationIntegrationTestClient : IAsyncDisposable
             foreach (var element in new StringTokenizer(payload, Separators.Ampersand))
             {
                 var segment = element;
-                if (segment.Length == 0)
+                if (!segment.HasValue || segment.Length is 0)
                 {
                     continue;
                 }
 
                 // Always skip the first char (# or ?).
-                if (segment.Offset == 0)
+                if (segment.Offset is 0)
                 {
                     segment = segment.Subsegment(1, segment.Length - 1);
                 }
 
                 var index = segment.IndexOf('=');
-                if (index == -1)
+                if (index is -1)
                 {
                     continue;
                 }
@@ -474,18 +430,18 @@ public class OpenIddictValidationIntegrationTestClient : IAsyncDisposable
             for (var line = await reader.ReadLineAsync(); line is not null; line = await reader.ReadLineAsync())
             {
                 var index = line.IndexOf(':');
-                if (index == -1)
+                if (index is -1)
                 {
                     continue;
                 }
 
-                var name = line.Substring(0, index);
+                var name = line[..index];
                 if (string.IsNullOrEmpty(name))
                 {
                     continue;
                 }
 
-                var value = line.Substring(index + 1);
+                var value = line[(index + 1)..];
 
                 parameters.Add(new KeyValuePair<string, string>(name, value));
             }

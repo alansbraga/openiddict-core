@@ -45,7 +45,7 @@ public class AuthenticationController : Controller
         // Such identities cannot be used as-is to build an authentication cookie in ASP.NET Core (as the
         // antiforgery stack requires at least a name claim to bind CSRF cookies to the user's identity) but
         // the access/refresh tokens can be retrieved using result.Properties.GetTokens() to make API calls.
-        if (result.Principal.Identity is not ClaimsIdentity { IsAuthenticated: true })
+        if (result.Principal is not ClaimsPrincipal { Identity.IsAuthenticated: true })
         {
             throw new InvalidOperationException("The external authorization data cannot be used for authentication.");
         }
@@ -105,11 +105,8 @@ public class AuthenticationController : Controller
             _ => false
         }));
 
-        // Note: "return SignIn(...)" cannot be directly used in this case, as the cookies handler doesn't allow
-        // redirecting from an endpoint that doesn't match the path set in CookieAuthenticationOptions.LoginPath.
-        // For more information about this restriction, visit https://github.com/dotnet/aspnetcore/issues/36934.
-        await HttpContext.SignInAsync(IdentityConstants.ExternalScheme, new ClaimsPrincipal(identity), properties);
-
-        return Redirect(properties.RedirectUri);
+        // Ask the cookie authentication handler to return a new cookie and redirect
+        // the user agent to the return URL stored in the authentication properties.
+        return SignIn(new ClaimsPrincipal(identity), properties, IdentityConstants.ExternalScheme);
     }
 }

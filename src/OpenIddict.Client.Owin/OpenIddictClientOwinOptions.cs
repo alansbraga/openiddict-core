@@ -11,7 +11,7 @@ namespace OpenIddict.Client.Owin;
 /// <summary>
 /// Provides various settings needed to configure the OpenIddict OWIN client integration.
 /// </summary>
-public class OpenIddictClientOwinOptions : AuthenticationOptions
+public sealed class OpenIddictClientOwinOptions : AuthenticationOptions
 {
     /// <summary>
     /// Creates a new instance of the <see cref="OpenIddictClientOwinOptions"/> class.
@@ -19,6 +19,13 @@ public class OpenIddictClientOwinOptions : AuthenticationOptions
     public OpenIddictClientOwinOptions()
         : base(OpenIddictClientOwinDefaults.AuthenticationType)
         => AuthenticationMode = AuthenticationMode.Passive;
+
+    /// <summary>
+    /// Gets or sets a boolean indicating whether incoming requests arriving on insecure endpoints should be
+    /// rejected and whether challenge and sign-out operations can be triggered from non-HTTPS endpoints.
+    /// By default, this property is set to <see langword="false"/> to help mitigate man-in-the-middle attacks.
+    /// </summary>
+    public bool DisableTransportSecurityRequirement { get; set; }
 
     /// <summary>
     /// Gets or sets a boolean indicating whether the pass-through mode is enabled for the post-logout redirection endpoint.

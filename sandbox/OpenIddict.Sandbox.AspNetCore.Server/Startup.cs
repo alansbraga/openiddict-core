@@ -76,6 +76,9 @@ public class Startup
                 // see https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#section-4.4.
                 options.SetRedirectionEndpointUris("/callback/login/github");
 
+                // Note: this sample uses the code flow, but you can enable the other flows if necessary.
+                options.AllowAuthorizationCodeFlow();
+
                 // Register the signing and encryption credentials used to protect
                 // sensitive data like the state tokens produced by OpenIddict.
                 options.AddDevelopmentEncryptionCertificate()
@@ -86,16 +89,19 @@ public class Startup
                        .EnableStatusCodePagesIntegration()
                        .EnableRedirectionEndpointPassthrough();
 
-                // Register the System.Net.Http integration.
-                options.UseSystemNetHttp();
+                // Register the System.Net.Http integration and use the identity of the current
+                // assembly as a more specific user agent, which can be useful when dealing with
+                // providers that use the user agent as a way to throttle requests (e.g Reddit).
+                options.UseSystemNetHttp()
+                       .SetProductInformation(typeof(Startup).Assembly);
 
                 // Register the Web providers integrations.
                 options.UseWebProviders()
-                       .AddGitHub(new()
+                       .UseGitHub(options =>
                        {
-                           ClientId = "c4ade52327b01ddacff3",
-                           ClientSecret = "da6bed851b75e317bf6b2cb67013679d9467c122",
-                           RedirectUri = new Uri("https://localhost:44395/callback/login/github", UriKind.Absolute)
+                           options.SetClientId("c4ade52327b01ddacff3")
+                                  .SetClientSecret("da6bed851b75e317bf6b2cb67013679d9467c122")
+                                  .SetRedirectUri("https://localhost:44395/callback/login/github");
                        });
             })
 
@@ -136,8 +142,7 @@ public class Startup
                        .EnableLogoutEndpointPassthrough()
                        .EnableTokenEndpointPassthrough()
                        .EnableUserinfoEndpointPassthrough()
-                       .EnableVerificationEndpointPassthrough()
-                       .DisableTransportSecurityRequirement(); // During development, you can disable the HTTPS requirement.
+                       .EnableVerificationEndpointPassthrough();
 
                 // Note: if you don't want to specify a client_id when sending
                 // a token or revocation request, uncomment the following line:

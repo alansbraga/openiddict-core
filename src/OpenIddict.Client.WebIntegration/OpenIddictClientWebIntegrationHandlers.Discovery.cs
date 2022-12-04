@@ -19,13 +19,15 @@ public static partial class OpenIddictClientWebIntegrationHandlers
              * Configuration response handling:
              */
             AmendIssuer.Descriptor,
-            AmendClientAuthenticationMethods.Descriptor,
-            AmendCodeChallengeMethods.Descriptor);
+            AmendGrantTypes.Descriptor,
+            AmendTokenEndpointClientAuthenticationMethods.Descriptor,
+            AmendCodeChallengeMethods.Descriptor,
+            AmendEndpoints.Descriptor);
 
         /// <summary>
         /// Contains the logic responsible for amending the issuer for the providers that require it.
         /// </summary>
-        public class AmendIssuer : IOpenIddictClientHandler<HandleConfigurationResponseContext>
+        public sealed class AmendIssuer : IOpenIddictClientHandler<HandleConfigurationResponseContext>
         {
             /// <summary>
             /// Gets the default descriptor definition assigned to this handler.
@@ -51,13 +53,11 @@ public static partial class OpenIddictClientWebIntegrationHandlers
                 // based on the client identity. As required by RFC8414, OpenIddict would automatically reject
                 // such responses as the issuer wouldn't match the expected value. To work around that, the issuer
                 // is replaced by this handler to always use "https://login.microsoftonline.com/common/v2.0".
-                if (context.Registration.GetProviderName() is Providers.Microsoft)
+                if (context.Registration.ProviderName is Providers.Microsoft &&
+                    context.Registration.GetMicrosoftOptions() is { Tenant: string tenant } &&
+                    string.Equals(tenant, "common", StringComparison.OrdinalIgnoreCase))
                 {
-                    var settings = context.Registration.GetMicrosoftSettings();
-                    if (string.Equals(settings.Tenant, "common", StringComparison.OrdinalIgnoreCase))
-                    {
-                        context.Response[Metadata.Issuer] = "https://login.microsoftonline.com/common/v2.0";
-                    }
+                    context.Response[Metadata.Issuer] = "https://login.microsoftonline.com/common/v2.0";
                 }
 
                 return default;
@@ -65,17 +65,67 @@ public static partial class OpenIddictClientWebIntegrationHandlers
         }
 
         /// <summary>
-        /// Contains the logic responsible for amending the supported
-        /// client authentication methods for the providers that require it.
+        /// Contains the logic responsible for amending the supported grant types for the providers that require it.
         /// </summary>
-        public class AmendClientAuthenticationMethods : IOpenIddictClientHandler<HandleConfigurationResponseContext>
+        public sealed class AmendGrantTypes : IOpenIddictClientHandler<HandleConfigurationResponseContext>
         {
             /// <summary>
             /// Gets the default descriptor definition assigned to this handler.
             /// </summary>
             public static OpenIddictClientHandlerDescriptor Descriptor { get; }
                 = OpenIddictClientHandlerDescriptor.CreateBuilder<HandleConfigurationResponseContext>()
-                    .UseSingletonHandler<AmendClientAuthenticationMethods>()
+                    .UseSingletonHandler<AmendGrantTypes>()
+                    .SetOrder(ExtractGrantTypes.Descriptor.Order + 500)
+                    .SetType(OpenIddictClientHandlerType.BuiltIn)
+                    .Build();
+
+            /// <inheritdoc/>
+            public ValueTask HandleAsync(HandleConfigurationResponseContext context)
+            {
+                if (context is null)
+                {
+                    throw new ArgumentNullException(nameof(context));
+                }
+
+                // Note: some providers don't list the grant types they support, which prevents the OpenIddict
+                // client from using them (unless they are assumed to be enabled by default, like the
+                // authorization code or implicit flows). To work around that, the list of supported grant
+                // types is amended to include the known supported types for the providers that require it.
+
+                if (context.Registration.ProviderName is Providers.Apple)
+                {
+                    context.Configuration.GrantTypesSupported.Add(GrantTypes.AuthorizationCode);
+                    context.Configuration.GrantTypesSupported.Add(GrantTypes.RefreshToken);
+                }
+
+                else if (context.Registration.ProviderName is Providers.Cognito or Providers.Microsoft)
+                {
+                    context.Configuration.GrantTypesSupported.Add(GrantTypes.AuthorizationCode);
+                    context.Configuration.GrantTypesSupported.Add(GrantTypes.ClientCredentials);
+                    context.Configuration.GrantTypesSupported.Add(GrantTypes.RefreshToken);
+                }
+
+                else if (context.Registration.ProviderName is Providers.Google)
+                {
+                    context.Configuration.GrantTypesSupported.Add(GrantTypes.Implicit);
+                }
+
+                return default;
+            }
+        }
+
+        /// <summary>
+        /// Contains the logic responsible for amending the client authentication
+        /// methods supported by the token endpoint for the providers that require it.
+        /// </summary>
+        public sealed class AmendTokenEndpointClientAuthenticationMethods : IOpenIddictClientHandler<HandleConfigurationResponseContext>
+        {
+            /// <summary>
+            /// Gets the default descriptor definition assigned to this handler.
+            /// </summary>
+            public static OpenIddictClientHandlerDescriptor Descriptor { get; }
+                = OpenIddictClientHandlerDescriptor.CreateBuilder<HandleConfigurationResponseContext>()
+                    .UseSingletonHandler<AmendTokenEndpointClientAuthenticationMethods>()
                     .SetOrder(ExtractTokenEndpointClientAuthenticationMethods.Descriptor.Order + 500)
                     .SetType(OpenIddictClientHandlerType.BuiltIn)
                     .Build();
@@ -95,7 +145,7 @@ public static partial class OpenIddictClientWebIntegrationHandlers
                 // is the same as private_key_jwt, the configuration is amended to assume Apple supports
                 // private_key_jwt and an event handler is responsible for populating the client_secret
                 // parameter using the client assertion token once it has been generated by OpenIddict.
-                if (context.Registration.GetProviderName() is Providers.Apple)
+                if (context.Registration.ProviderName is Providers.Apple)
                 {
                     context.Configuration.TokenEndpointAuthMethodsSupported.Add(
                         ClientAuthenticationMethods.PrivateKeyJwt);
@@ -109,7 +159,7 @@ public static partial class OpenIddictClientWebIntegrationHandlers
         /// Contains the logic responsible for amending the supported
         /// code challenge methods for the providers that require it.
         /// </summary>
-        public class AmendCodeChallengeMethods : IOpenIddictClientHandler<HandleConfigurationResponseContext>
+        public sealed class AmendCodeChallengeMethods : IOpenIddictClientHandler<HandleConfigurationResponseContext>
         {
             /// <summary>
             /// Gets the default descriptor definition assigned to this handler.
@@ -129,14 +179,59 @@ public static partial class OpenIddictClientWebIntegrationHandlers
                     throw new ArgumentNullException(nameof(context));
                 }
 
-                // Microsoft Account supports both "plain" and "S256" code challenge methods but
-                // don't list them in the server configuration metadata. To ensure the OpenIddict
+                // Microsoft Account supports both the "plain" and "S256" code challenge methods but
+                // doesn't list them in the server configuration metadata. To ensure the OpenIddict
                 // client uses Proof Key for Code Exchange for the Microsoft provider, the 2 methods
                 // are manually added to the list of supported code challenge methods by this handler.
-                if (context.Registration.GetProviderName() is Providers.Microsoft)
+                if (context.Registration.ProviderName is Providers.Microsoft)
                 {
                     context.Configuration.CodeChallengeMethodsSupported.Add(CodeChallengeMethods.Plain);
                     context.Configuration.CodeChallengeMethodsSupported.Add(CodeChallengeMethods.Sha256);
+                }
+
+                return default;
+            }
+        }
+
+        /// <summary>
+        /// Contains the logic responsible for amending the endpoint URIs for the providers that require it.
+        /// </summary>
+        public sealed class AmendEndpoints : IOpenIddictClientHandler<HandleConfigurationResponseContext>
+        {
+            /// <summary>
+            /// Gets the default descriptor definition assigned to this handler.
+            /// </summary>
+            public static OpenIddictClientHandlerDescriptor Descriptor { get; }
+                = OpenIddictClientHandlerDescriptor.CreateBuilder<HandleConfigurationResponseContext>()
+                    .UseSingletonHandler<AmendEndpoints>()
+                    .SetOrder(int.MaxValue - 100_000)
+                    .SetType(OpenIddictClientHandlerType.BuiltIn)
+                    .Build();
+
+            /// <inheritdoc/>
+            public ValueTask HandleAsync(HandleConfigurationResponseContext context)
+            {
+                if (context is null)
+                {
+                    throw new ArgumentNullException(nameof(context));
+                }
+
+                // While PayPal supports OpenID Connect discovery, the configuration document returned
+                // by the sandbox environment always contains the production endpoints, which would
+                // prevent the OpenIddict integration from working properly when using the sandbox mode.
+                // To work around that, the endpoints are manually overriden when this environment is used.
+                if (context.Registration.ProviderName is Providers.PayPal &&
+                    context.Registration.GetPayPalOptions() is { Environment: string environment } &&
+                    string.Equals(environment, PayPal.Environments.Sandbox, StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Configuration.AuthorizationEndpoint =
+                        new Uri("https://www.sandbox.paypal.com/signin/authorize", UriKind.Absolute);
+                    context.Configuration.JwksUri =
+                        new Uri("https://api-m.sandbox.paypal.com/v1/oauth2/certs", UriKind.Absolute);
+                    context.Configuration.TokenEndpoint =
+                        new Uri("https://api-m.sandbox.paypal.com/v1/oauth2/token", UriKind.Absolute);
+                    context.Configuration.UserinfoEndpoint =
+                        new Uri("https://api-m.sandbox.paypal.com/v1/oauth2/token/userinfo", UriKind.Absolute);
                 }
 
                 return default;

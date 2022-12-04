@@ -11,8 +11,15 @@ namespace OpenIddict.Client.AspNetCore;
 /// <summary>
 /// Provides various settings needed to configure the OpenIddict ASP.NET Core client integration.
 /// </summary>
-public class OpenIddictClientAspNetCoreOptions : AuthenticationSchemeOptions
+public sealed class OpenIddictClientAspNetCoreOptions : AuthenticationSchemeOptions
 {
+    /// <summary>
+    /// Gets or sets a boolean indicating whether incoming requests arriving on insecure endpoints should be
+    /// rejected and whether challenge and sign-out operations can be triggered from non-HTTPS endpoints.
+    /// By default, this property is set to <see langword="false"/> to help mitigate man-in-the-middle attacks.
+    /// </summary>
+    public bool DisableTransportSecurityRequirement { get; set; }
+
     /// <summary>
     /// Gets or sets a boolean indicating whether the pass-through mode is enabled for the post-logout redirection endpoint.
     /// When the pass-through mode is used, OpenID Connect requests are initially handled by OpenIddict.

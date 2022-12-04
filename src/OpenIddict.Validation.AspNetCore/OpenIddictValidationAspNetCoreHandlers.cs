@@ -8,7 +8,6 @@ using System.Collections.Immutable;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
 using Microsoft.AspNetCore;
 using Microsoft.Extensions.Logging;
@@ -42,8 +41,8 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
         /*
          * Challenge processing:
          */
+        ResolveHostChallengeProperties.Descriptor,
         AttachHostChallengeError.Descriptor,
-        ResolveHostChallengeParameters.Descriptor,
 
         /*
          * Response processing:
@@ -62,7 +61,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     /// Contains the logic responsible for infering the default issuer from the HTTP request host and validating it.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class InferIssuerFromHost : IOpenIddictValidationHandler<ProcessRequestContext>
+    public sealed class InferIssuerFromHost : IOpenIddictValidationHandler<ProcessRequestContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -126,7 +125,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     /// Contains the logic responsible for extracting the access token from the standard HTTP Authorization header.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class ExtractAccessTokenFromAuthorizationHeader : IOpenIddictValidationHandler<ProcessAuthenticationContext>
+    public sealed class ExtractAccessTokenFromAuthorizationHeader : IOpenIddictValidationHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -161,10 +160,10 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
 
             // Resolve the access token from the standard Authorization header.
             // See https://tools.ietf.org/html/rfc6750#section-2.1 for more information.
-            string header = request.Headers[HeaderNames.Authorization];
+            string? header = request.Headers[HeaderNames.Authorization];
             if (!string.IsNullOrEmpty(header) && header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
             {
-                context.AccessToken = header.Substring("Bearer ".Length);
+                context.AccessToken = header["Bearer ".Length..];
 
                 return default;
             }
@@ -177,7 +176,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     /// Contains the logic responsible for extracting the access token from the standard access_token form parameter.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class ExtractAccessTokenFromBodyForm : IOpenIddictValidationHandler<ProcessAuthenticationContext>
+    public sealed class ExtractAccessTokenFromBodyForm : IOpenIddictValidationHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -232,7 +231,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     /// Contains the logic responsible for extracting the access token from the standard access_token query parameter.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class ExtractAccessTokenFromQueryString : IOpenIddictValidationHandler<ProcessAuthenticationContext>
+    public sealed class ExtractAccessTokenFromQueryString : IOpenIddictValidationHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -279,10 +278,71 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     }
 
     /// <summary>
+    /// Contains the logic responsible for resolving the context-specific properties and parameters stored in the
+    /// ASP.NET Core authentication properties specified by the application that triggered the challenge operation.
+    /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
+    /// </summary>
+    public sealed class ResolveHostChallengeProperties : IOpenIddictValidationHandler<ProcessChallengeContext>
+    {
+        /// <summary>
+        /// Gets the default descriptor definition assigned to this handler.
+        /// </summary>
+        public static OpenIddictValidationHandlerDescriptor Descriptor { get; }
+            = OpenIddictValidationHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
+                .AddFilter<RequireHttpRequest>()
+                .UseSingletonHandler<ResolveHostChallengeProperties>()
+                .SetOrder(AttachHostChallengeError.Descriptor.Order - 500)
+                .SetType(OpenIddictValidationHandlerType.BuiltIn)
+                .Build();
+
+        /// <inheritdoc/>
+        public ValueTask HandleAsync(ProcessChallengeContext context)
+        {
+            if (context is null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            var properties = context.Transaction.GetProperty<AuthenticationProperties>(typeof(AuthenticationProperties).FullName!);
+            if (properties is { Items.Count: > 0 })
+            {
+                foreach (var property in properties.Items)
+                {
+                    context.Properties[property.Key] = property.Value;
+                }
+            }
+
+            if (properties is { Parameters.Count: > 0 })
+            {
+                foreach (var parameter in properties.Parameters)
+                {
+                    context.Parameters[parameter.Key] = parameter.Value switch
+                    {
+                        OpenIddictParameter value => value,
+                        JsonElement         value => new OpenIddictParameter(value),
+                        bool                value => new OpenIddictParameter(value),
+                        int                 value => new OpenIddictParameter(value),
+                        long                value => new OpenIddictParameter(value),
+                        string              value => new OpenIddictParameter(value),
+                        string[]            value => new OpenIddictParameter(value),
+
+    #if SUPPORTS_JSON_NODES
+                        JsonNode            value => new OpenIddictParameter(value),
+    #endif
+                        _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0115))
+                    };
+                }
+            }
+
+            return default;
+        }
+    }
+
+    /// <summary>
     /// Contains the logic responsible for attaching the error details using the ASP.NET Core authentication properties.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class AttachHostChallengeError : IOpenIddictValidationHandler<ProcessChallengeContext>
+    public sealed class AttachHostChallengeError : IOpenIddictValidationHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -317,65 +377,10 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     }
 
     /// <summary>
-    /// Contains the logic responsible for resolving the additional sign-in parameters stored in the ASP.NET
-    /// Core authentication properties specified by the application that triggered the sign-in operation.
-    /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
-    /// </summary>
-    public class ResolveHostChallengeParameters : IOpenIddictValidationHandler<ProcessChallengeContext>
-    {
-        /// <summary>
-        /// Gets the default descriptor definition assigned to this handler.
-        /// </summary>
-        public static OpenIddictValidationHandlerDescriptor Descriptor { get; }
-            = OpenIddictValidationHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
-                .AddFilter<RequireHttpRequest>()
-                .UseSingletonHandler<ResolveHostChallengeParameters>()
-                .SetOrder(AttachCustomChallengeParameters.Descriptor.Order - 500)
-                .SetType(OpenIddictValidationHandlerType.BuiltIn)
-                .Build();
-
-        /// <inheritdoc/>
-        public ValueTask HandleAsync(ProcessChallengeContext context)
-        {
-            if (context is null)
-            {
-                throw new ArgumentNullException(nameof(context));
-            }
-
-            var properties = context.Transaction.GetProperty<AuthenticationProperties>(typeof(AuthenticationProperties).FullName!);
-            if (properties is null)
-            {
-                return default;
-            }
-
-            foreach (var parameter in properties.Parameters)
-            {
-                context.Parameters[parameter.Key] = parameter.Value switch
-                {
-                    OpenIddictParameter value => value,
-                    JsonElement         value => new OpenIddictParameter(value),
-                    bool                value => new OpenIddictParameter(value),
-                    int                 value => new OpenIddictParameter(value),
-                    long                value => new OpenIddictParameter(value),
-                    string              value => new OpenIddictParameter(value),
-                    string[]            value => new OpenIddictParameter(value),
-
-#if SUPPORTS_JSON_NODES
-                    JsonNode            value => new OpenIddictParameter(value),
-#endif
-                    _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0115))
-                };
-            }
-
-            return default;
-        }
-    }
-
-    /// <summary>
     /// Contains the logic responsible for attaching an appropriate HTTP status code.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class AttachHttpResponseCode<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
+    public sealed class AttachHttpResponseCode<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -425,7 +430,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     /// Contains the logic responsible for attaching the appropriate HTTP response cache headers.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class AttachCacheControlHeader<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
+    public sealed class AttachCacheControlHeader<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -464,7 +469,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     /// Contains the logic responsible for attaching errors details to the WWW-Authenticate header.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class AttachWwwAuthenticateHeader<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
+    public sealed class AttachWwwAuthenticateHeader<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
     {
         private readonly IOptionsMonitor<OpenIddictValidationAspNetCoreOptions> _options;
 
@@ -553,7 +558,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
             }
 
             // If the WWW-Authenticate header ends with a comma, remove it.
-            if (builder[builder.Length - 1] == ',')
+            if (builder[^1] == ',')
             {
                 builder.Remove(builder.Length - 1, 1);
             }
@@ -568,7 +573,7 @@ public static partial class OpenIddictValidationAspNetCoreHandlers
     /// Contains the logic responsible for processing challenge responses that contain a WWW-Authenticate header.
     /// Note: this handler is not used when the OpenID Connect request is not initially handled by ASP.NET Core.
     /// </summary>
-    public class ProcessChallengeErrorResponse<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
+    public sealed class ProcessChallengeErrorResponse<TContext> : IOpenIddictValidationHandler<TContext> where TContext : BaseRequestContext
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.

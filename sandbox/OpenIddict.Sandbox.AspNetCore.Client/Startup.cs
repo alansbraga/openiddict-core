@@ -91,6 +91,11 @@ public class Startup
                 options.SetPostLogoutRedirectionEndpointUris(
                     "/callback/logout/local");
 
+                // Note: this sample uses the authorization code and refresh token
+                // flows, but you can enable the other flows if necessary.
+                options.AllowAuthorizationCodeFlow()
+                       .AllowRefreshTokenFlow();
+
                 // Register the signing and encryption credentials used to protect
                 // sensitive data like the state tokens produced by OpenIddict.
                 options.AddDevelopmentEncryptionCertificate()
@@ -102,12 +107,16 @@ public class Startup
                        .EnableRedirectionEndpointPassthrough()
                        .EnablePostLogoutRedirectionEndpointPassthrough();
 
-                // Register the System.Net.Http integration.
-                options.UseSystemNetHttp();
+                // Register the System.Net.Http integration and use the identity of the current
+                // assembly as a more specific user agent, which can be useful when dealing with
+                // providers that use the user agent as a way to throttle requests (e.g Reddit).
+                options.UseSystemNetHttp()
+                       .SetProductInformation(typeof(Startup).Assembly);
 
                 // Add a client registration matching the client application definition in the server project.
                 options.AddRegistration(new OpenIddictClientRegistration
                 {
+                    ProviderName = "Local",
                     Issuer = new Uri("https://localhost:44395/", UriKind.Absolute),
 
                     ClientId = "mvc",
@@ -115,37 +124,38 @@ public class Startup
                     Scopes = { Scopes.Email, Scopes.Profile, Scopes.OfflineAccess, "demo_api" },
 
                     RedirectUri = new Uri("https://localhost:44381/callback/login/local", UriKind.Absolute),
-                    PostLogoutRedirectUri = new Uri("https://localhost:44381/callback/logout/local", UriKind.Absolute),
+                    PostLogoutRedirectUri = new Uri("https://localhost:44381/callback/logout/local", UriKind.Absolute)
                 });
 
                 // Register the Web providers integrations.
                 options.UseWebProviders()
-                       .AddGitHub(new()
+                       .UseGitHub(options =>
                        {
-                           ClientId = "c4ade52327b01ddacff3",
-                           ClientSecret = "da6bed851b75e317bf6b2cb67013679d9467c122",
-                           RedirectUri = new Uri("https://localhost:44381/callback/login/github", UriKind.Absolute)
+                           options.SetClientId("c4ade52327b01ddacff3")
+                                  .SetClientSecret("da6bed851b75e317bf6b2cb67013679d9467c122")
+                                  .SetRedirectUri("https://localhost:44381/callback/login/github");
                        })
-                       .AddGoogle(new()
+                       .UseGoogle(options =>
                        {
-                           ClientId = "1016114395689-kgtgq2p6dj27d7v6e2kjkoj54dgrrckh.apps.googleusercontent.com",
-                           ClientSecret = "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",
-                           RedirectUri = new Uri("https://localhost:44381/callback/login/google", UriKind.Absolute),
-                           Scopes = { Scopes.Profile }
+                           options.SetClientId("1016114395689-kgtgq2p6dj27d7v6e2kjkoj54dgrrckh.apps.googleusercontent.com")
+                                  .SetClientSecret("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")
+                                  .SetRedirectUri("https://localhost:44381/callback/login/google")
+                                  .SetAccessType("offline")
+                                  .AddScopes(Scopes.Profile);
                        })
-                       .AddReddit(new()
+                       .UseReddit(options =>
                        {
-                           ClientId = "vDLNqhrkwrvqHgnoBWF3og",
-                           ClientSecret = "Tpab28Dz0upyZLqn7AN3GFD1O-zaAw",
-                           RedirectUri = new Uri("https://localhost:44381/callback/login/reddit", UriKind.Absolute),
-                           ProductName = "DemoApp",
-                           ProductVersion = "1.0.0"
+                           options.SetClientId("vDLNqhrkwrvqHgnoBWF3og")
+                                  .SetClientSecret("Tpab28Dz0upyZLqn7AN3GFD1O-zaAw")
+                                  .SetRedirectUri("https://localhost:44381/callback/login/reddit")
+                                  .SetDuration("permanent");
                        })
-                       .AddTwitter(new()
+                       .UseTwitter(options =>
                        {
-                           ClientId = "bXgwc0U3N3A3YWNuaWVsdlRmRWE6MTpjaQ",
-                           ClientSecret = "VcohOgBp-6yQCurngo4GAyKeZh0D6SUCCSjJgEo1uRzJarjIUS",
-                           RedirectUri = new Uri("https://localhost:44381/callback/login/twitter", UriKind.Absolute)
+                           options.SetClientId("bXgwc0U3N3A3YWNuaWVsdlRmRWE6MTpjaQ")
+                                  .SetClientSecret("VcohOgBp-6yQCurngo4GAyKeZh0D6SUCCSjJgEo1uRzJarjIUS")
+                                  .SetRedirectUri("https://localhost:44381/callback/login/twitter")
+                                  .AddScopes("offline.access");
                        });
             });
 

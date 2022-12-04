@@ -10,6 +10,7 @@ using System.Security.Claims;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using OpenIddict.Extensions;
 
 namespace OpenIddict.Server;
 
@@ -61,7 +62,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for extracting device requests and invoking the corresponding event handlers.
         /// </summary>
-        public class ExtractDeviceRequest : IOpenIddictServerHandler<ProcessRequestContext>
+        public sealed class ExtractDeviceRequest : IOpenIddictServerHandler<ProcessRequestContext>
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -123,7 +124,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for validating device requests and invoking the corresponding event handlers.
         /// </summary>
-        public class ValidateDeviceRequest : IOpenIddictServerHandler<ProcessRequestContext>
+        public sealed class ValidateDeviceRequest : IOpenIddictServerHandler<ProcessRequestContext>
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -180,7 +181,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for handling device requests and invoking the corresponding event handlers.
         /// </summary>
-        public class HandleDeviceRequest : IOpenIddictServerHandler<ProcessRequestContext>
+        public sealed class HandleDeviceRequest : IOpenIddictServerHandler<ProcessRequestContext>
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -281,7 +282,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for processing sign-in responses and invoking the corresponding event handlers.
         /// </summary>
-        public class ApplyDeviceResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+        public sealed class ApplyDeviceResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -329,7 +330,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for rejecting device requests that don't specify a client identifier.
         /// </summary>
-        public class ValidateClientIdParameter : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateClientIdParameter : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             /// <summary>
             /// Gets the default descriptor definition assigned to this handler.
@@ -370,7 +371,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for rejecting device requests that don't specify a valid scope parameter.
         /// </summary>
-        public class ValidateScopeParameter : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateScopeParameter : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             /// <summary>
             /// Gets the default descriptor definition assigned to this handler.
@@ -409,7 +410,7 @@ public static partial class OpenIddictServerHandlers
         /// Contains the logic responsible for rejecting authorization requests that use unregistered scopes.
         /// Note: this handler partially works with the degraded mode but is not used when scope validation is disabled.
         /// </summary>
-        public class ValidateScopes : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateScopes : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             private readonly IOpenIddictScopeManager? _scopeManager;
 
@@ -446,13 +447,13 @@ public static partial class OpenIddictServerHandlers
                 }
 
                 // If all the specified scopes are registered in the options, avoid making a database lookup.
-                var scopes = new HashSet<string>(context.Request.GetScopes(), StringComparer.Ordinal);
+                var scopes = context.Request.GetScopes().ToHashSet(StringComparer.Ordinal);
                 scopes.ExceptWith(context.Options.Scopes);
 
                 // Note: the remaining scopes are only checked if the degraded mode was not enabled,
                 // as this requires using the scope manager, which is never used with the degraded mode,
                 // even if the service was registered and resolved from the dependency injection container.
-                if (scopes.Count != 0 && !context.Options.EnableDegradedMode)
+                if (scopes.Count is not 0 && !context.Options.EnableDegradedMode)
                 {
                     if (_scopeManager is null)
                     {
@@ -470,7 +471,7 @@ public static partial class OpenIddictServerHandlers
                 }
 
                 // If at least one scope was not recognized, return an error.
-                if (scopes.Count != 0)
+                if (scopes.Count is not 0)
                 {
                     context.Logger.LogInformation(SR.GetResourceString(SR.ID6057), scopes);
 
@@ -488,7 +489,7 @@ public static partial class OpenIddictServerHandlers
         /// Contains the logic responsible for rejecting device requests that use an invalid client_id.
         /// Note: this handler is not used when the degraded mode is enabled.
         /// </summary>
-        public class ValidateClientId : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateClientId : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             private readonly IOpenIddictApplicationManager _applicationManager;
 
@@ -541,7 +542,7 @@ public static partial class OpenIddictServerHandlers
         /// whose client type is not compatible with the requested grant type.
         /// Note: this handler is not used when the degraded mode is enabled.
         /// </summary>
-        public class ValidateClientType : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateClientType : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             private readonly IOpenIddictApplicationManager _applicationManager;
 
@@ -612,7 +613,7 @@ public static partial class OpenIddictServerHandlers
         /// Contains the logic responsible for rejecting device requests specifying an invalid client secret.
         /// Note: this handler is not used when the degraded mode is enabled.
         /// </summary>
-        public class ValidateClientSecret : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateClientSecret : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             private readonly IOpenIddictApplicationManager _applicationManager;
 
@@ -673,7 +674,7 @@ public static partial class OpenIddictServerHandlers
         /// applications that haven't been granted the device endpoint permission.
         /// Note: this handler is not used when the degraded mode is enabled.
         /// </summary>
-        public class ValidateEndpointPermissions : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateEndpointPermissions : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             private readonly IOpenIddictApplicationManager _applicationManager;
 
@@ -727,7 +728,7 @@ public static partial class OpenIddictServerHandlers
         /// Contains the logic responsible for rejecting device requests made by unauthorized applications.
         /// Note: this handler is not used when the degraded mode is enabled or when grant type permissions are disabled.
         /// </summary>
-        public class ValidateGrantTypePermissions : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateGrantTypePermissions : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             private readonly IOpenIddictApplicationManager _applicationManager;
 
@@ -796,7 +797,7 @@ public static partial class OpenIddictServerHandlers
         /// that haven't been granted the appropriate grant type permission.
         /// Note: this handler is not used when the degraded mode is enabled.
         /// </summary>
-        public class ValidateScopePermissions : IOpenIddictServerHandler<ValidateDeviceRequestContext>
+        public sealed class ValidateScopePermissions : IOpenIddictServerHandler<ValidateDeviceRequestContext>
         {
             private readonly IOpenIddictApplicationManager _applicationManager;
 
@@ -859,7 +860,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for extracting verification requests and invoking the corresponding event handlers.
         /// </summary>
-        public class ExtractVerificationRequest : IOpenIddictServerHandler<ProcessRequestContext>
+        public sealed class ExtractVerificationRequest : IOpenIddictServerHandler<ProcessRequestContext>
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -921,7 +922,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for validating verification requests and invoking the corresponding event handlers.
         /// </summary>
-        public class ValidateVerificationRequest : IOpenIddictServerHandler<ProcessRequestContext>
+        public sealed class ValidateVerificationRequest : IOpenIddictServerHandler<ProcessRequestContext>
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -978,7 +979,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for handling verification requests and invoking the corresponding event handlers.
         /// </summary>
-        public class HandleVerificationRequest : IOpenIddictServerHandler<ProcessRequestContext>
+        public sealed class HandleVerificationRequest : IOpenIddictServerHandler<ProcessRequestContext>
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -1075,7 +1076,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for processing sign-in responses and invoking the corresponding event handlers.
         /// </summary>
-        public class ApplyVerificationResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
+        public sealed class ApplyVerificationResponse<TContext> : IOpenIddictServerHandler<TContext> where TContext : BaseRequestContext
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 
@@ -1123,7 +1124,7 @@ public static partial class OpenIddictServerHandlers
         /// <summary>
         /// Contains the logic responsible for attaching the claims principal resolved from the user code.
         /// </summary>
-        public class AttachUserCodePrincipal : IOpenIddictServerHandler<HandleVerificationRequestContext>
+        public sealed class AttachUserCodePrincipal : IOpenIddictServerHandler<HandleVerificationRequestContext>
         {
             private readonly IOpenIddictServerDispatcher _dispatcher;
 

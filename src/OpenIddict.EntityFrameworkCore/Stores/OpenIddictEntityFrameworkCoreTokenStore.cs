@@ -505,7 +505,7 @@ public class OpenIddictEntityFrameworkCoreTokenStore<TToken, TApplication, TAuth
             }
 
             return builder.ToImmutable();
-        });
+        })!;
 
         return new(properties);
     }
@@ -685,7 +685,7 @@ public class OpenIddictEntityFrameworkCoreTokenStore<TToken, TApplication, TAuth
                  orderby token.Id
                  select token).Take(1_000).ToListAsync(cancellationToken);
 
-            if (tokens.Count == 0)
+            if (tokens.Count is 0)
             {
                 break;
             }

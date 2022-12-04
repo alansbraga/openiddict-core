@@ -4,52 +4,69 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Mvc;
 using OpenIddict.Client.AspNetCore;
 using static OpenIddict.Abstractions.OpenIddictConstants;
+using static OpenIddict.Client.WebIntegration.OpenIddictClientWebIntegrationConstants;
 
 namespace OpenIddict.Sandbox.AspNetCore.Client.Controllers;
 
 public class AuthenticationController : Controller
 {
-    [HttpGet("~/login")]
+    [HttpPost("~/login"), ValidateAntiForgeryToken]
     public ActionResult LogIn(string provider, string returnUrl)
     {
-        var issuer = provider switch
-        {
-            "local" or "local-github" => "https://localhost:44395/",
-            "github"                  => "https://github.com/",
-            "google"                  => "https://accounts.google.com/",
-            "reddit"                  => "https://www.reddit.com/",
-            "twitter"                 => "https://twitter.com/",
-
-            _ => null
-        };
-
-        if (string.IsNullOrEmpty(issuer))
+        // Note: OpenIddict always validates the specified provider name when handling the challenge operation,
+        // but the provider can also be validated earlier to return an error page or a special HTTP error code.
+        if (!string.Equals(provider, "Local",           StringComparison.Ordinal) &&
+            !string.Equals(provider, "Local+GitHub",    StringComparison.Ordinal) &&
+            !string.Equals(provider, Providers.GitHub,  StringComparison.Ordinal) &&
+            !string.Equals(provider, Providers.Google,  StringComparison.Ordinal) &&
+            !string.Equals(provider, Providers.Reddit,  StringComparison.Ordinal) &&
+            !string.Equals(provider, Providers.Twitter, StringComparison.Ordinal))
         {
             return BadRequest();
         }
-
-        var properties = new AuthenticationProperties(new Dictionary<string, string>
-        {
-            // Note: when only one client is registered in the client options,
-            // setting the issuer property is not required and can be omitted.
-            [OpenIddictClientAspNetCoreConstants.Properties.Issuer] = issuer
-        })
-        {
-            // Only allow local return URLs to prevent open redirect attacks.
-            RedirectUri = Url.IsLocalUrl(returnUrl) ? returnUrl : "/"
-        };
 
         // The local authorization server sample allows the client to select the external
         // identity provider that will be used to eventually authenticate the user. For that,
         // a custom "identity_provider" parameter is sent to the authorization server so that
         // the user is directly redirected to GitHub (in this case, no login page is shown).
-        if (provider is "local-github")
+        if (string.Equals(provider, "Local+GitHub", StringComparison.Ordinal))
         {
-            properties.Parameters[Parameters.IdentityProvider] = "github";
+            var properties = new AuthenticationProperties(new Dictionary<string, string>
+            {
+                // Note: when only one client is registered in the client options,
+                // specifying the issuer URI or the provider name is not required.
+                [OpenIddictClientAspNetCoreConstants.Properties.ProviderName] = "Local"
+            })
+            {
+                // Only allow local return URLs to prevent open redirect attacks.
+                RedirectUri = Url.IsLocalUrl(returnUrl) ? returnUrl : "/",
+
+                Parameters =
+                {
+                    [Parameters.IdentityProvider] = "GitHub"
+                }
+            };
+
+            // Ask the OpenIddict client middleware to redirect the user agent to the identity provider.
+            return Challenge(properties, OpenIddictClientAspNetCoreDefaults.AuthenticationScheme);
         }
 
-        // Ask the OpenIddict client middleware to redirect the user agent to the identity provider.
-        return Challenge(properties, OpenIddictClientAspNetCoreDefaults.AuthenticationScheme);
+        else
+        {
+            var properties = new AuthenticationProperties(new Dictionary<string, string>
+            {
+                // Note: when only one client is registered in the client options,
+                // specifying the issuer URI or the provider name is not required.
+                [OpenIddictClientAspNetCoreConstants.Properties.ProviderName] = provider
+            })
+            {
+                // Only allow local return URLs to prevent open redirect attacks.
+                RedirectUri = Url.IsLocalUrl(returnUrl) ? returnUrl : "/"
+            };
+
+            // Ask the OpenIddict client middleware to redirect the user agent to the identity provider.
+            return Challenge(properties, OpenIddictClientAspNetCoreDefaults.AuthenticationScheme);
+        }
     }
 
     [HttpPost("~/logout"), ValidateAntiForgeryToken]
@@ -132,7 +149,7 @@ public class AuthenticationController : Controller
         // Such identities cannot be used as-is to build an authentication cookie in ASP.NET Core (as the
         // antiforgery stack requires at least a name claim to bind CSRF cookies to the user's identity) but
         // the access/refresh tokens can be retrieved using result.Properties.GetTokens() to make API calls.
-        if (result.Principal.Identity is not ClaimsIdentity { IsAuthenticated: true })
+        if (result.Principal is not ClaimsPrincipal { Identity.IsAuthenticated: true })
         {
             throw new InvalidOperationException("The external authorization data cannot be used for authentication.");
         }
@@ -191,12 +208,9 @@ public class AuthenticationController : Controller
             _ => false
         }));
 
-        // Note: "return SignIn(...)" cannot be directly used in this case, as the cookies handler doesn't allow
-        // redirecting from an endpoint that doesn't match the path set in CookieAuthenticationOptions.LoginPath.
-        // For more information about this restriction, visit https://github.com/dotnet/aspnetcore/issues/36934.
-        await HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity), properties);
-
-        return Redirect(properties.RedirectUri);
+        // Ask the cookie authentication handler to return a new cookie and redirect
+        // the user agent to the return URL stored in the authentication properties.
+        return SignIn(new ClaimsPrincipal(identity), properties, CookieAuthenticationDefaults.AuthenticationScheme);
     }
 
     // Note: this controller uses the same callback action for all providers

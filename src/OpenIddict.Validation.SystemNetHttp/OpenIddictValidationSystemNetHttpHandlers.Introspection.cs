@@ -20,7 +20,8 @@ public static partial class OpenIddictValidationSystemNetHttpHandlers
              * Introspection request processing:
              */
             PreparePostHttpRequest<PrepareIntrospectionRequestContext>.Descriptor,
-            AttachUserAgent<PrepareIntrospectionRequestContext>.Descriptor,
+            AttachJsonAcceptHeaders<PrepareIntrospectionRequestContext>.Descriptor,
+            AttachUserAgentHeader<PrepareIntrospectionRequestContext>.Descriptor,
             AttachBasicAuthenticationCredentials.Descriptor,
             AttachFormParameters<PrepareIntrospectionRequestContext>.Descriptor,
             SendHttpRequest<ApplyIntrospectionRequestContext>.Descriptor,
@@ -29,6 +30,7 @@ public static partial class OpenIddictValidationSystemNetHttpHandlers
             /*
              * Introspection response processing:
              */
+            DecompressResponseContent<ExtractIntrospectionResponseContext>.Descriptor,
             ExtractJsonHttpResponse<ExtractIntrospectionResponseContext>.Descriptor,
             ExtractWwwAuthenticateHeader<ExtractIntrospectionResponseContext>.Descriptor,
             ValidateHttpResponse<ExtractIntrospectionResponseContext>.Descriptor,
@@ -37,7 +39,7 @@ public static partial class OpenIddictValidationSystemNetHttpHandlers
         /// <summary>
         /// Contains the logic responsible for attaching the client credentials to the HTTP Authorization header.
         /// </summary>
-        public class AttachBasicAuthenticationCredentials : IOpenIddictValidationHandler<PrepareIntrospectionRequestContext>
+        public sealed class AttachBasicAuthenticationCredentials : IOpenIddictValidationHandler<PrepareIntrospectionRequestContext>
         {
             /// <summary>
             /// Gets the default descriptor definition assigned to this handler.

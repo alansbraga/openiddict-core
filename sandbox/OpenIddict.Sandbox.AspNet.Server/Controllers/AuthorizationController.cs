@@ -14,7 +14,6 @@ using System.Web;
 using System.Web.Mvc;
 using Microsoft.AspNet.Identity;
 using Microsoft.AspNet.Identity.Owin;
-using Microsoft.IdentityModel.Tokens;
 using Microsoft.Owin.Security;
 using OpenIddict.Abstractions;
 using OpenIddict.Client.Owin;
@@ -23,6 +22,7 @@ using OpenIddict.Sandbox.AspNet.Server.ViewModels.Authorization;
 using OpenIddict.Server.Owin;
 using Owin;
 using static OpenIddict.Abstractions.OpenIddictConstants;
+using static OpenIddict.Client.WebIntegration.OpenIddictClientWebIntegrationConstants;
 
 namespace OpenIddict.Sandbox.AspNet.Server.Controllers
 {
@@ -60,14 +60,7 @@ namespace OpenIddict.Sandbox.AspNet.Server.Controllers
                 // that will be used to authenticate the user, the identity_provider parameter can be used for that.
                 if (!string.IsNullOrEmpty(request.IdentityProvider))
                 {
-                    var issuer = request.IdentityProvider switch
-                    {
-                        "github" => "https://github.com/",
-
-                        _ => null
-                    };
-
-                    if (string.IsNullOrEmpty(issuer))
+                    if (!string.Equals(request.IdentityProvider, Providers.GitHub, StringComparison.Ordinal))
                     {
                         context.Authentication.Challenge(
                             authenticationTypes: OpenIddictServerOwinDefaults.AuthenticationType,
@@ -84,8 +77,8 @@ namespace OpenIddict.Sandbox.AspNet.Server.Controllers
                     var properties = new AuthenticationProperties(new Dictionary<string, string>
                     {
                         // Note: when only one client is registered in the client options,
-                        // setting the issuer property is not required and can be omitted.
-                        [OpenIddictClientOwinConstants.Properties.Issuer] = issuer
+                        // specifying the issuer URI or the provider name is not required.
+                        [OpenIddictClientOwinConstants.Properties.ProviderName] = request.IdentityProvider
                     })
                     {
                         // Once the callback is handled, redirect the user agent to the ASP.NET Identity
@@ -149,10 +142,10 @@ namespace OpenIddict.Sandbox.AspNet.Server.Controllers
                         roleType: Claims.Role);
 
                     // Add the claims that will be persisted in the tokens.
-                    identity.AddClaim(Claims.Subject, user.Id)
-                            .AddClaim(Claims.Email, user.Email)
-                            .AddClaim(Claims.Name, user.UserName)
-                            .AddClaims(Claims.Role, (await context.Get<ApplicationUserManager>().GetRolesAsync(user.Id)).ToImmutableArray());
+                    identity.SetClaim(Claims.Subject, user.Id)
+                            .SetClaim(Claims.Email, user.Email)
+                            .SetClaim(Claims.Name, user.UserName)
+                            .SetClaims(Claims.Role, (await context.Get<ApplicationUserManager>().GetRolesAsync(user.Id)).ToImmutableArray());
 
                     // Note: in this sample, the granted scopes match the requested scope
                     // but you may want to allow the user to uncheck specific scopes.
@@ -163,15 +156,12 @@ namespace OpenIddict.Sandbox.AspNet.Server.Controllers
                     // Automatically create a permanent authorization to avoid requiring explicit consent
                     // for future authorization or token requests containing the same scopes.
                     var authorization = authorizations.LastOrDefault();
-                    if (authorization == null)
-                    {
-                        authorization = await _authorizationManager.CreateAsync(
-                            principal: new ClaimsPrincipal(identity),
-                            subject  : user.Id,
-                            client   : await _applicationManager.GetIdAsync(application),
-                            type     : AuthorizationTypes.Permanent,
-                            scopes   : identity.GetScopes());
-                    }
+                    authorization ??= await _authorizationManager.CreateAsync(
+                        identity: identity,
+                        subject : user.Id,
+                        client  : await _applicationManager.GetIdAsync(application),
+                        type    : AuthorizationTypes.Permanent,
+                        scopes  : identity.GetScopes());
 
                     identity.SetAuthorizationId(await _authorizationManager.GetIdAsync(authorization));
                     identity.SetDestinations(GetDestinations);
@@ -270,10 +260,10 @@ namespace OpenIddict.Sandbox.AspNet.Server.Controllers
                 roleType: Claims.Role);
 
             // Add the claims that will be persisted in the tokens.
-            identity.AddClaim(Claims.Subject, user.Id)
-                    .AddClaim(Claims.Email, user.Email)
-                    .AddClaim(Claims.Name, user.UserName)
-                    .AddClaims(Claims.Role, (await context.Get<ApplicationUserManager>().GetRolesAsync(user.Id)).ToImmutableArray());
+            identity.SetClaim(Claims.Subject, user.Id)
+                    .SetClaim(Claims.Email, user.Email)
+                    .SetClaim(Claims.Name, user.UserName)
+                    .SetClaims(Claims.Role, (await context.Get<ApplicationUserManager>().GetRolesAsync(user.Id)).ToImmutableArray());
 
             // Note: in this sample, the granted scopes match the requested scope
             // but you may want to allow the user to uncheck specific scopes.
@@ -284,15 +274,12 @@ namespace OpenIddict.Sandbox.AspNet.Server.Controllers
             // Automatically create a permanent authorization to avoid requiring explicit consent
             // for future authorization or token requests containing the same scopes.
             var authorization = authorizations.LastOrDefault();
-            if (authorization == null)
-            {
-                authorization = await _authorizationManager.CreateAsync(
-                    principal: new ClaimsPrincipal(identity),
-                    subject  : user.Id,
-                    client   : await _applicationManager.GetIdAsync(application),
-                    type     : AuthorizationTypes.Permanent,
-                    scopes   : identity.GetScopes());
-            }
+            authorization ??= await _authorizationManager.CreateAsync(
+                identity: identity,
+                subject : user.Id,
+                client  : await _applicationManager.GetIdAsync(application),
+                type    : AuthorizationTypes.Permanent,
+                scopes  : identity.GetScopes());
 
             identity.SetAuthorizationId(await _authorizationManager.GetIdAsync(authorization));
             identity.SetDestinations(GetDestinations);
@@ -389,6 +376,13 @@ namespace OpenIddict.Sandbox.AspNet.Server.Controllers
                     authenticationType: OpenIddictServerOwinDefaults.AuthenticationType,
                     nameType: Claims.Name,
                     roleType: Claims.Role);
+
+                // Override the user claims present in the principal in case they
+                // changed since the authorization code/refresh token was issued.
+                identity.SetClaim(Claims.Subject, user.Id)
+                        .SetClaim(Claims.Email, user.Email)
+                        .SetClaim(Claims.Name, user.UserName)
+                        .SetClaims(Claims.Role, (await context.Get<ApplicationUserManager>().GetRolesAsync(user.Id)).ToImmutableArray());
 
                 identity.SetDestinations(GetDestinations);
 

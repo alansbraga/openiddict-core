@@ -4,17 +4,20 @@
  * the license and the contributors participating to this project.
  */
 
+using System.ComponentModel;
 using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Tokens;
+using OpenIddict.Extensions;
 
 namespace OpenIddict.Client;
 
 /// <summary>
 /// Contains the methods required to ensure that the OpenIddict client configuration is valid.
 /// </summary>
-public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictClientOptions>
+[EditorBrowsable(EditorBrowsableState.Advanced)]
+public sealed class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictClientOptions>
 {
     private readonly OpenIddictClientService _service;
 
@@ -27,7 +30,7 @@ public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictCli
     /// </summary>
     /// <param name="name">The authentication scheme associated with the handler instance.</param>
     /// <param name="options">The options instance to initialize.</param>
-    public void PostConfigure(string name, OpenIddictClientOptions options)
+    public void PostConfigure(string? name, OpenIddictClientOptions options)
     {
         if (options is null)
         {
@@ -61,16 +64,13 @@ public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictCli
 
                 else
                 {
-                    if (!options.Handlers.Any(descriptor => descriptor.ContextType == typeof(ApplyConfigurationRequestContext)) ||
-                        !options.Handlers.Any(descriptor => descriptor.ContextType == typeof(ApplyCryptographyRequestContext)))
+                    if (!options.Handlers.Exists(static descriptor => descriptor.ContextType == typeof(ApplyConfigurationRequestContext)) ||
+                        !options.Handlers.Exists(static descriptor => descriptor.ContextType == typeof(ApplyCryptographyRequestContext)))
                     {
                         throw new InvalidOperationException(SR.GetResourceString(SR.ID0313));
                     }
 
-                    if (registration.MetadataAddress is null)
-                    {
-                        registration.MetadataAddress = new Uri(".well-known/openid-configuration", UriKind.Relative);
-                    }
+                    registration.MetadataAddress ??= new Uri(".well-known/openid-configuration", UriKind.Relative);
 
                     if (!registration.MetadataAddress.IsAbsoluteUri)
                     {
@@ -82,8 +82,7 @@ public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictCli
 
                         if (registration.MetadataAddress.OriginalString.StartsWith("/", StringComparison.Ordinal))
                         {
-                            registration.MetadataAddress = new Uri(registration.MetadataAddress.OriginalString.Substring(
-                                1, registration.MetadataAddress.OriginalString.Length - 1), UriKind.Relative);
+                            registration.MetadataAddress = new Uri(registration.MetadataAddress.OriginalString[1..], UriKind.Relative);
                         }
 
                         registration.MetadataAddress = new Uri(issuer, registration.MetadataAddress);
@@ -97,6 +96,86 @@ public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictCli
                     };
                 }
             }
+        }
+
+        // Ensure at least one flow has been enabled.
+        if (options.GrantTypes.Count is 0 && options.ResponseTypes.Count is 0)
+        {
+            throw new InvalidOperationException(SR.GetResourceString(SR.ID0076));
+        }
+
+        var addresses = options.RedirectionEndpointUris.Distinct()
+            .Concat(options.PostLogoutRedirectionEndpointUris.Distinct())
+            .ToList();
+
+        // Ensure endpoint addresses are unique across endpoints.
+        if (addresses.Count != addresses.Distinct().Count())
+        {
+            throw new InvalidOperationException(SR.GetResourceString(SR.ID0285));
+        }
+
+        // Ensure the redirection endpoint has been enabled when the authorization code or implicit grants are supported.
+        if (options.RedirectionEndpointUris.Count is 0 && (options.GrantTypes.Contains(GrantTypes.AuthorizationCode) ||
+                                                           options.GrantTypes.Contains(GrantTypes.Implicit)))
+        {
+            throw new InvalidOperationException(SR.GetResourceString(SR.ID0356));
+        }
+
+        // Ensure the grant types/response types configuration is consistent.
+        foreach (var type in options.ResponseTypes)
+        {
+            var types = type.Split(Separators.Space, StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+            if (types.Contains(ResponseTypes.Code) && !options.GrantTypes.Contains(GrantTypes.AuthorizationCode))
+            {
+                throw new InvalidOperationException(SR.FormatID0281(ResponseTypes.Code));
+            }
+
+            if (types.Contains(ResponseTypes.IdToken) && !options.GrantTypes.Contains(GrantTypes.Implicit))
+            {
+                throw new InvalidOperationException(SR.FormatID0282(ResponseTypes.IdToken));
+            }
+
+            if (types.Contains(ResponseTypes.Token) && !options.GrantTypes.Contains(GrantTypes.Implicit))
+            {
+                throw new InvalidOperationException(SR.FormatID0282(ResponseTypes.Token));
+            }
+        }
+
+        // When the redirection or post-logout redirection endpoint has been enabled, ensure signing
+        // and encryption credentials have been provided as they are required to protect state tokens.
+        if (options.RedirectionEndpointUris.Count is not 0 || options.PostLogoutRedirectionEndpointUris.Count is not 0)
+        {
+            if (options.EncryptionCredentials.Count is 0)
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0357));
+            }
+
+            if (options.SigningCredentials.Count is 0)
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0358));
+            }
+        }
+
+        // Ensure issuers are not used in multiple client registrations.
+        if (options.Registrations.Count != options.Registrations.Select(registration => registration.Issuer)
+                                                                .Distinct()
+                                                                .Count())
+        {
+            throw new InvalidOperationException(SR.GetResourceString(SR.ID0342));
+        }
+
+        // Ensure provider names are not used in multiple client registrations.
+        //
+        // Note: a string comparer ignoring casing is deliberately used to prevent
+        // two providers using the same name with a different casing from being added.
+        if (options.Registrations
+            .Where(registration => !string.IsNullOrEmpty(registration.ProviderName))
+            .Count() != options.Registrations.Select(registration => registration.ProviderName)
+                                             .Where(name => !string.IsNullOrEmpty(name))
+                                             .Distinct(StringComparer.OrdinalIgnoreCase)
+                                             .Count())
+        {
+            throw new InvalidOperationException(SR.GetResourceString(SR.ID0347));
         }
 
         // Sort the handlers collection using the order associated with each handler.
@@ -135,7 +214,7 @@ public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictCli
             (SecurityKey, SymmetricSecurityKey) => 1,
 
             // If one of the keys is backed by a X.509 certificate, don't prefer it if it's not valid yet.
-            (X509SecurityKey first, SecurityKey) when first.Certificate.NotBefore > DateTime.Now => 1,
+            (X509SecurityKey first, SecurityKey)  when first.Certificate.NotBefore  > DateTime.Now => 1,
             (SecurityKey, X509SecurityKey second) when second.Certificate.NotBefore > DateTime.Now => 1,
 
             // If the two keys are backed by a X.509 certificate, prefer the one with the furthest expiration date.
@@ -174,7 +253,7 @@ public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictCli
 
                 // Only use the 40 first chars of the base64url-encoded modulus.
                 var identifier = Base64UrlEncoder.Encode(parameters.Modulus);
-                return identifier.Substring(0, Math.Min(identifier.Length, 40)).ToUpperInvariant();
+                return identifier[..Math.Min(identifier.Length, 40)].ToUpperInvariant();
             }
 
 #if SUPPORTS_ECDSA
@@ -187,7 +266,7 @@ public class OpenIddictClientConfiguration : IPostConfigureOptions<OpenIddictCli
 
                 // Only use the 40 first chars of the base64url-encoded X coordinate.
                 var identifier = Base64UrlEncoder.Encode(parameters.Q.X);
-                return identifier.Substring(0, Math.Min(identifier.Length, 40)).ToUpperInvariant();
+                return identifier[..Math.Min(identifier.Length, 40)].ToUpperInvariant();
             }
 #endif
 

@@ -14,7 +14,7 @@ namespace Microsoft.Extensions.DependencyInjection;
 /// Exposes the necessary methods required to configure
 /// the OpenIddict client OWIN/Katana integration.
 /// </summary>
-public class OpenIddictClientOwinBuilder
+public sealed class OpenIddictClientOwinBuilder
 {
     /// <summary>
     /// Initializes a new instance of <see cref="OpenIddictClientOwinBuilder"/>.
@@ -34,7 +34,7 @@ public class OpenIddictClientOwinBuilder
     /// </summary>
     /// <param name="configuration">The delegate used to configure the OpenIddict options.</param>
     /// <remarks>This extension can be safely called multiple times.</remarks>
-    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/> instance.</returns>
     public OpenIddictClientOwinBuilder Configure(Action<OpenIddictClientOwinOptions> configuration)
     {
         if (configuration is null)
@@ -48,12 +48,19 @@ public class OpenIddictClientOwinBuilder
     }
 
     /// <summary>
+    /// Disables the transport security requirement (HTTPS).
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/> instance.</returns>
+    public OpenIddictClientOwinBuilder DisableTransportSecurityRequirement()
+        => Configure(options => options.DisableTransportSecurityRequirement = true);
+
+    /// <summary>
     /// Enables the pass-through mode for the OpenID Connect post-logout redirection endpoint.
     /// When the pass-through mode is used, OpenID Connect requests are initially handled by OpenIddict.
     /// Once validated, the rest of the request processing pipeline is invoked, so that OpenID Connect requests
     /// can be handled at a later stage (in a custom middleware or in a MVC controller, for instance).
     /// </summary>
-    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/> instance.</returns>
     public OpenIddictClientOwinBuilder EnablePostLogoutRedirectionEndpointPassthrough()
         => Configure(options => options.EnablePostLogoutRedirectionEndpointPassthrough = true);
 
@@ -63,7 +70,7 @@ public class OpenIddictClientOwinBuilder
     /// Once validated, the rest of the request processing pipeline is invoked, so that OpenID Connect requests
     /// can be handled at a later stage (in a custom middleware or in a MVC controller, for instance).
     /// </summary>
-    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/> instance.</returns>
     public OpenIddictClientOwinBuilder EnableRedirectionEndpointPassthrough()
         => Configure(options => options.EnableRedirectionEndpointPassthrough = true);
 
@@ -76,30 +83,20 @@ public class OpenIddictClientOwinBuilder
     /// <remarks>
     /// Important: the error pass-through mode cannot be used when the status code pages integration is enabled.
     /// </remarks>
-    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientOwinBuilder"/> instance.</returns>
     [EditorBrowsable(EditorBrowsableState.Advanced)]
     public OpenIddictClientOwinBuilder EnableErrorPassthrough()
         => Configure(options => options.EnableErrorPassthrough = true);
 
-    /// <summary>
-    /// Determines whether the specified object is equal to the current object.
-    /// </summary>
-    /// <param name="obj">The object to compare with the current object.</param>
-    /// <returns><see langword="true"/> if the specified object is equal to the current object; otherwise, false.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override bool Equals(object? obj) => base.Equals(obj);
 
-    /// <summary>
-    /// Serves as the default hash function.
-    /// </summary>
-    /// <returns>A hash code for the current object.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override int GetHashCode() => base.GetHashCode();
 
-    /// <summary>
-    /// Returns a string that represents the current object.
-    /// </summary>
-    /// <returns>A string that represents the current object.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override string? ToString() => base.ToString();
 }

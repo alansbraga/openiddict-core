@@ -7,14 +7,13 @@
 using System.Collections.Immutable;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Claims;
-using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
-
-#if !SUPPORTS_TIME_CONSTANT_COMPARISONS
-using Org.BouncyCastle.Utilities;
-#endif
+using OpenIddict.Extensions;
+using static OpenIddict.Abstractions.OpenIddictExceptions;
 
 namespace OpenIddict.Client;
 
@@ -26,17 +25,18 @@ public static partial class OpenIddictClientHandlers
          * Authentication processing:
          */
         ValidateAuthenticationDemand.Descriptor,
+        ResolveClientRegistrationFromAuthenticationContext.Descriptor,
         EvaluateValidatedUpfrontTokens.Descriptor,
         ResolveValidatedStateToken.Descriptor,
         ValidateRequiredStateToken.Descriptor,
         ValidateStateToken.Descriptor,
         RedeemStateTokenEntry.Descriptor,
         ValidateStateTokenEndpointType.Descriptor,
+        ValidateRequestForgeryProtection.Descriptor,
         ResolveClientRegistrationFromStateToken.Descriptor,
         ValidateIssuerParameter.Descriptor,
-        ValidateFrontchannelErrorParameters.Descriptor,
-        ResolveGrantTypeFromStateToken.Descriptor,
-        ResolveResponseTypeFromStateToken.Descriptor,
+        HandleFrontchannelErrorResponse.Descriptor,
+        ResolveGrantTypeAndResponseTypeFromStateToken.Descriptor,
 
         EvaluateValidatedFrontchannelTokens.Descriptor,
         ResolveValidatedFrontchannelTokens.Descriptor,
@@ -60,7 +60,6 @@ public static partial class OpenIddictClientHandlers
         GenerateClientAssertionToken.Descriptor,
         AttachTokenRequestClientCredentials.Descriptor,
         SendTokenRequest.Descriptor,
-        ValidateTokenErrorParameters.Descriptor,
 
         EvaluateValidatedBackchannelTokens.Descriptor,
         ResolveValidatedBackchannelTokens.Descriptor,
@@ -80,7 +79,6 @@ public static partial class OpenIddictClientHandlers
         EvaluateUserinfoRequest.Descriptor,
         AttachUserinfoRequestParameters.Descriptor,
         SendUserinfoRequest.Descriptor,
-        ValidateUserinfoErrorParameters.Descriptor,
         EvaluateValidatedUserinfoToken.Descriptor,
         ValidateRequiredUserinfoToken.Descriptor,
         ValidateUserinfoToken.Descriptor,
@@ -92,9 +90,9 @@ public static partial class OpenIddictClientHandlers
          */
         ValidateChallengeDemand.Descriptor,
         ResolveClientRegistrationFromChallengeContext.Descriptor,
-        AttachGrantType.Descriptor,
+        AttachGrantTypeAndResponseType.Descriptor,
         EvaluateGeneratedChallengeTokens.Descriptor,
-        AttachResponseType.Descriptor,
+        AttachChallengeHostProperties.Descriptor,
         AttachResponseMode.Descriptor,
         AttachClientId.Descriptor,
         AttachRedirectUri.Descriptor,
@@ -116,6 +114,8 @@ public static partial class OpenIddictClientHandlers
         AttachOptionalClientId.Descriptor,
         AttachPostLogoutRedirectUri.Descriptor,
         EvaluateGeneratedLogoutTokens.Descriptor,
+        AttachSignOutHostProperties.Descriptor,
+        AttachLogoutNonce.Descriptor,
         AttachLogoutRequestForgeryProtection.Descriptor,
         PrepareLogoutStateTokenPrincipal.Descriptor,
         GenerateLogoutStateToken.Descriptor,
@@ -137,7 +137,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for rejecting invalid authentication demands.
     /// </summary>
-    public class ValidateAuthenticationDemand : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateAuthenticationDemand : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -165,6 +165,17 @@ public static partial class OpenIddictClientHandlers
             {
                 case OpenIddictClientEndpointType.Redirection:
                 case OpenIddictClientEndpointType.PostLogoutRedirection:
+                    // Ensure signing/and encryption credentials are present as they are required to protect state tokens.
+                    if (context.Options.EncryptionCredentials.Count is 0)
+                    {
+                        throw new InvalidOperationException(SR.GetResourceString(SR.ID0357));
+                    }
+
+                    if (context.Options.SigningCredentials.Count is 0)
+                    {
+                        throw new InvalidOperationException(SR.GetResourceString(SR.ID0358));
+                    }
+
                     break;
 
                 case OpenIddictClientEndpointType.Unknown:
@@ -178,6 +189,11 @@ public static partial class OpenIddictClientHandlers
                         GrantTypes.Implicit          or GrantTypes.Password          or GrantTypes.RefreshToken))
                     {
                         throw new InvalidOperationException(SR.FormatID0310(context.GrantType));
+                    }
+
+                    if (!context.Options.GrantTypes.Contains(context.GrantType))
+                    {
+                        throw new InvalidOperationException(SR.FormatID0359(context.GrantType));
                     }
 
                     if (context.GrantType is GrantTypes.Password)
@@ -199,6 +215,16 @@ public static partial class OpenIddictClientHandlers
                         throw new InvalidOperationException(SR.GetResourceString(SR.ID0311));
                     }
 
+                    // If no issuer was explicitly attached and a single client is registered, use it.
+                    // Otherwise, throw an exception to indicate that setting an explicit issuer
+                    // is required when multiple clients are registered.
+                    context.Issuer ??= context.Options.Registrations.Count switch
+                    {
+                        0 => throw new InvalidOperationException(SR.GetResourceString(SR.ID0304)),
+                        1 => context.Options.Registrations[0].Issuer,
+                        _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0355))
+                    };
+
                     break;
 
                 default: throw new InvalidOperationException(SR.GetResourceString(SR.ID0290));
@@ -209,9 +235,67 @@ public static partial class OpenIddictClientHandlers
     }
 
     /// <summary>
+    /// Contains the logic responsible for resolving the client registration applicable to the authentication demand.
+    /// </summary>
+    public sealed class ResolveClientRegistrationFromAuthenticationContext : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    {
+        /// <summary>
+        /// Gets the default descriptor definition assigned to this handler.
+        /// </summary>
+        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
+            = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
+                .UseSingletonHandler<ResolveClientRegistrationFromAuthenticationContext>()
+                .SetOrder(ValidateAuthenticationDemand.Descriptor.Order + 1_000)
+                .SetType(OpenIddictClientHandlerType.BuiltIn)
+                .Build();
+
+        /// <inheritdoc/>
+        public async ValueTask HandleAsync(ProcessAuthenticationContext context)
+        {
+            if (context is null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            // Note: this handler only applies to authentication demands triggered from unknown endpoints.
+            //
+            // Client registrations/configurations that need to be resolved as part of authentication demands
+            // triggered from the redirection or post-logout redirection requests are handled elsewhere.
+            if (context.EndpointType is not OpenIddictClientEndpointType.Unknown)
+            {
+                return;
+            }
+
+            // Note: if the static registration cannot be found in the options, this may indicate
+            // the client was removed after the authorization dance started and thus, can no longer
+            // be used to authenticate users. In this case, throw an exception to abort the flow.
+            context.Registration ??= context.Options.Registrations.Find(
+                registration => registration.Issuer == context.Issuer) ??
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0292));
+
+            // Resolve and attach the server configuration to the context if none has been set already.
+            context.Configuration ??= await context.Registration.ConfigurationManager.GetConfigurationAsync(default) ??
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0140));
+
+            // Ensure the issuer resolved from the configuration matches the expected value.
+            if (context.Configuration.Issuer != context.Issuer)
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0307));
+            }
+
+            // Ensure the selected grant type, if explicitly set, is listed as supported in the configuration.
+            if (!string.IsNullOrEmpty(context.GrantType) &&
+                !context.Configuration.GrantTypesSupported.Contains(context.GrantType))
+            {
+                throw new InvalidOperationException(SR.FormatID0363(context.GrantType));
+            }
+        }
+    }
+
+    /// <summary>
     /// Contains the logic responsible for determining the types of tokens to validate upfront.
     /// </summary>
-    public class EvaluateValidatedUpfrontTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class EvaluateValidatedUpfrontTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -219,7 +303,7 @@ public static partial class OpenIddictClientHandlers
         public static OpenIddictClientHandlerDescriptor Descriptor { get; }
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
                 .UseSingletonHandler<EvaluateValidatedUpfrontTokens>()
-                .SetOrder(ValidateAuthenticationDemand.Descriptor.Order + 1_000)
+                .SetOrder(ResolveClientRegistrationFromAuthenticationContext.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
@@ -259,7 +343,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for resolving the state token to validate upfront from the incoming request.
     /// </summary>
-    public class ResolveValidatedStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ResolveValidatedStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -294,7 +378,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for rejecting authentication demands that lack the required state token.
     /// </summary>
-    public class ValidateRequiredStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateRequiredStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -333,7 +417,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the state token resolved from the context.
     /// </summary>
-    public class ValidateStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -402,7 +486,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for redeeming the token entry corresponding to the received state token.
     /// Note: this handler is not used when the degraded mode is enabled.
     /// </summary>
-    public class RedeemStateTokenEntry : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class RedeemStateTokenEntry : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictTokenManager _tokenManager;
 
@@ -462,7 +546,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for ensuring the resolved state
     /// token is suitable for the requested authentication demand.
     /// </summary>
-    public class ValidateStateTokenEndpointType : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateStateTokenEndpointType : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -509,10 +593,73 @@ public static partial class OpenIddictClientHandlers
     }
 
     /// <summary>
+    /// Contains the logic responsible for validating the request forgery protection claim that serves as a
+    /// protection against state token injection, forged requests, denial of service and session fixation attacks.
+    /// </summary>
+    public sealed class ValidateRequestForgeryProtection : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    {
+        /// <summary>
+        /// Gets the default descriptor definition assigned to this handler.
+        /// </summary>
+        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
+            = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
+                .AddFilter<RequireStateTokenValidated>()
+                .UseSingletonHandler<ValidateRequestForgeryProtection>()
+                .SetOrder(ValidateStateTokenEndpointType.Descriptor.Order + 1_000)
+                .SetType(OpenIddictClientHandlerType.BuiltIn)
+                .Build();
+
+        /// <inheritdoc/>
+        public ValueTask HandleAsync(ProcessAuthenticationContext context)
+        {
+            if (context is null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            Debug.Assert(context.StateTokenPrincipal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
+
+            // Resolve the request forgery protection from the state token principal.
+            var comparand = context.StateTokenPrincipal.GetClaim(Claims.RequestForgeryProtection);
+            if (string.IsNullOrEmpty(comparand))
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0339));
+            }
+
+            // The request forgery protection serves as a binding mechanism ensuring that a
+            // state token stolen from an authorization response with the other parameters
+            // cannot be validly used without also sending the matching correlation identifier.
+            //
+            // If the request forgery protection couldn't be resolved at this point or doesn't
+            // match the expected value, this may indicate that the authentication demand is
+            // unsolicited and potentially malicious (or caused by an invalid or unadequate
+            // same-site configuration, if the authentication demand was handled by a web server).
+            //
+            // In any case, the authentication demand MUST be rejected as it's impossible to ensure
+            // it's not an injection or session fixation attack without the correct "rfp" value.
+            if (string.IsNullOrEmpty(context.RequestForgeryProtection) || !OpenIddictHelpers.FixedTimeEquals(
+                left:  MemoryMarshal.AsBytes(comparand.AsSpan()),
+                right: MemoryMarshal.AsBytes(context.RequestForgeryProtection.AsSpan())))
+            {
+                context.Logger.LogWarning(SR.GetResourceString(SR.ID6209));
+
+                context.Reject(
+                    error: Errors.InvalidRequest,
+                    description: SR.GetResourceString(SR.ID2164),
+                    uri: SR.FormatID8000(SR.ID2164));
+
+                return default;
+            }
+
+            return default;
+        }
+    }
+
+    /// <summary>
     /// Contains the logic responsible for resolving the client registration
     /// based on the authorization server identity stored in the state token.
     /// </summary>
-    public class ResolveClientRegistrationFromStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ResolveClientRegistrationFromStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -521,7 +668,7 @@ public static partial class OpenIddictClientHandlers
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
                 .AddFilter<RequireStateTokenPrincipal>()
                 .UseSingletonHandler<ResolveClientRegistrationFromStateToken>()
-                .SetOrder(ValidateStateTokenEndpointType.Descriptor.Order + 1_000)
+                .SetOrder(ValidateRequestForgeryProtection.Descriptor.Order + 1_000)
                 .Build();
 
         /// <inheritdoc/>
@@ -554,30 +701,26 @@ public static partial class OpenIddictClientHandlers
             // Note: if the static registration cannot be found in the options, this may indicate
             // the client was removed after the authorization dance started and thus, can no longer
             // be used to authenticate users. In this case, throw an exception to abort the flow.
-            var registration = context.Options.Registrations.Find(registration => registration.Issuer == issuer) ??
+            context.Issuer = issuer;
+            context.Registration = context.Options.Registrations.Find(registration => registration.Issuer == issuer) ??
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0292));
 
-            context.Issuer = issuer;
-            context.Registration = registration;
-
             // Resolve and attach the server configuration to the context.
-            var configuration = await context.Registration.ConfigurationManager.GetConfigurationAsync(default) ??
+            context.Configuration = await context.Registration.ConfigurationManager.GetConfigurationAsync(default) ??
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0140));
 
             // Ensure the issuer resolved from the configuration matches the expected value.
-            if (configuration.Issuer != context.Issuer)
+            if (context.Configuration.Issuer != context.Issuer)
             {
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0307));
             }
-
-            context.Configuration = configuration;
         }
     }
 
     /// <summary>
     /// Contains the logic responsible for ensuring the issuer parameter, if available, matches the expected issuer.
     /// </summary>
-    public class ValidateIssuerParameter : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateIssuerParameter : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -661,7 +804,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for rejecting errored authorization responses.
     /// </summary>
-    public class ValidateFrontchannelErrorParameters : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class HandleFrontchannelErrorResponse : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -669,7 +812,7 @@ public static partial class OpenIddictClientHandlers
         public static OpenIddictClientHandlerDescriptor Descriptor { get; }
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
                 .AddFilter<RequireRedirectionRequest>()
-                .UseSingletonHandler<ValidateFrontchannelErrorParameters>()
+                .UseSingletonHandler<HandleFrontchannelErrorResponse>()
                 .SetOrder(ValidateIssuerParameter.Descriptor.Order + 1_000)
                 .Build();
 
@@ -681,17 +824,60 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
-            var (error, description, uri) = (
-                (string?) context.Request[Parameters.Error],
-                (string?) context.Request[Parameters.ErrorDescription],
-                (string?) context.Request[Parameters.ErrorUri]);
-
+            // Note: for more information about the standard error codes,
+            // see https://www.rfc-editor.org/rfc/rfc6749#section-4.1.2.1 and
+            // https://openid.net/specs/openid-connect-core-1_0.html#AuthError.
+            var error = (string?) context.Request[Parameters.Error];
             if (!string.IsNullOrEmpty(error))
             {
+                context.Logger.LogInformation(SR.GetResourceString(SR.ID6208), context.Request);
+
                 context.Reject(
-                    error: error ?? Errors.InvalidRequest,
-                    description: description,
-                    uri: uri);
+                    error: error switch
+                    {
+                        Errors.AccessDenied             => Errors.AccessDenied,
+                        Errors.AccountSelectionRequired => Errors.AccountSelectionRequired,
+                        Errors.ConsentRequired          => Errors.ConsentRequired,
+                        Errors.InteractionRequired      => Errors.InteractionRequired,
+                        Errors.InvalidRequest           => Errors.InvalidRequest,
+                        Errors.InvalidScope             => Errors.InvalidScope,
+                        Errors.LoginRequired            => Errors.LoginRequired,
+                        Errors.ServerError              => Errors.ServerError,
+                        Errors.TemporarilyUnavailable   => Errors.TemporarilyUnavailable,
+                        Errors.UnauthorizedClient       => Errors.UnauthorizedClient,
+                        Errors.UnsupportedResponseType  => Errors.UnsupportedResponseType,
+                        _                               => Errors.InvalidRequest
+                    },
+                    description: error switch
+                    {
+                        Errors.AccessDenied             => SR.GetResourceString(SR.ID2149),
+                        Errors.AccountSelectionRequired => SR.GetResourceString(SR.ID2156),
+                        Errors.ConsentRequired          => SR.GetResourceString(SR.ID2157),
+                        Errors.InteractionRequired      => SR.GetResourceString(SR.ID2158),
+                        Errors.InvalidRequest           => SR.GetResourceString(SR.ID2150),
+                        Errors.InvalidScope             => SR.GetResourceString(SR.ID2151),
+                        Errors.LoginRequired            => SR.GetResourceString(SR.ID2159),
+                        Errors.ServerError              => SR.GetResourceString(SR.ID2152),
+                        Errors.TemporarilyUnavailable   => SR.GetResourceString(SR.ID2153),
+                        Errors.UnauthorizedClient       => SR.GetResourceString(SR.ID2154),
+                        Errors.UnsupportedResponseType  => SR.GetResourceString(SR.ID2155),
+                        _                               => SR.GetResourceString(SR.ID2160)
+                    },
+                    uri: error switch
+                    {
+                        Errors.AccessDenied             => SR.FormatID8000(SR.ID2149),
+                        Errors.AccountSelectionRequired => SR.FormatID8000(SR.ID2156),
+                        Errors.ConsentRequired          => SR.FormatID8000(SR.ID2157),
+                        Errors.InteractionRequired      => SR.FormatID8000(SR.ID2158),
+                        Errors.InvalidRequest           => SR.FormatID8000(SR.ID2150),
+                        Errors.InvalidScope             => SR.FormatID8000(SR.ID2151),
+                        Errors.LoginRequired            => SR.FormatID8000(SR.ID2159),
+                        Errors.ServerError              => SR.FormatID8000(SR.ID2152),
+                        Errors.TemporarilyUnavailable   => SR.FormatID8000(SR.ID2153),
+                        Errors.UnauthorizedClient       => SR.FormatID8000(SR.ID2154),
+                        Errors.UnsupportedResponseType  => SR.FormatID8000(SR.ID2155),
+                        _                               => SR.FormatID8000(SR.ID2160)
+                    });
 
                 return default;
             }
@@ -701,10 +887,10 @@ public static partial class OpenIddictClientHandlers
     }
 
     /// <summary>
-    /// Contains the logic responsible for resolving the grant type
-    /// initially negotiated and stored in the state token, if applicable.
+    /// Contains the logic responsible for resolving the flow initially
+    /// negotiated and stored in the state token, if applicable.
     /// </summary>
-    public class ResolveGrantTypeFromStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ResolveGrantTypeAndResponseTypeFromStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -713,8 +899,8 @@ public static partial class OpenIddictClientHandlers
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
                 .AddFilter<RequireRedirectionRequest>()
                 .AddFilter<RequireStateTokenPrincipal>()
-                .UseSingletonHandler<ResolveGrantTypeFromStateToken>()
-                .SetOrder(ValidateFrontchannelErrorParameters.Descriptor.Order + 1_000)
+                .UseSingletonHandler<ResolveGrantTypeAndResponseTypeFromStateToken>()
+                .SetOrder(HandleFrontchannelErrorResponse.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
@@ -728,18 +914,22 @@ public static partial class OpenIddictClientHandlers
 
             Debug.Assert(context.StateTokenPrincipal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
 
-            // Resolve the negotiated grant type from the state token.
-            var type = context.StateTokenPrincipal.GetClaim(Claims.Private.GrantType);
+            // Resolve the negotiated flow from the state token.
+            (context.GrantType, context.ResponseType) = (
+                context.StateTokenPrincipal.GetClaim(Claims.Private.GrantType),
+                context.StateTokenPrincipal.GetClaim(Claims.Private.ResponseType));
 
-            // Note: OpenIddict currently only supports the implicit, authorization code and refresh
-            // token grants but additional grants (like CIBA) may be supported in future versions.
-            switch (context.EndpointType)
+            switch ((context.EndpointType, context.GrantType, context.ResponseType))
             {
                 // Authentication demands triggered from the redirection endpoint are only valid for
                 // the authorization code and implicit grants (which includes the hybrid flow, that
-                // can be represented using either the authorization code or implicit grant types).
-                case OpenIddictClientEndpointType.Redirection when type is not
-                    (GrantTypes.AuthorizationCode or GrantTypes.Implicit):
+                // can be represented using either the authorization code or implicit grant types) and
+                // the "none" flow where no access/identity token or authorization code is returned.
+                case (OpenIddictClientEndpointType.Redirection, GrantTypes.AuthorizationCode or GrantTypes.Implicit, _):
+                case (OpenIddictClientEndpointType.Redirection, null, ResponseTypes.None):
+                    break;
+
+                case (OpenIddictClientEndpointType.Redirection, _, _):
                     context.Reject(
                         error: Errors.InvalidRequest,
                         description: SR.GetResourceString(SR.ID2130),
@@ -748,43 +938,6 @@ public static partial class OpenIddictClientHandlers
                     return default;
             }
 
-            context.GrantType = type;
-
-            return default;
-        }
-    }
-
-    /// <summary>
-    /// Contains the logic responsible for resolving the response type
-    /// initially negotiated and stored in the state token, if applicable.
-    /// </summary>
-    public class ResolveResponseTypeFromStateToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
-    {
-        /// <summary>
-        /// Gets the default descriptor definition assigned to this handler.
-        /// </summary>
-        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
-            = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
-                .AddFilter<RequireRedirectionRequest>()
-                .AddFilter<RequireStateTokenPrincipal>()
-                .UseSingletonHandler<ResolveResponseTypeFromStateToken>()
-                .SetOrder(ResolveGrantTypeFromStateToken.Descriptor.Order + 1_000)
-                .SetType(OpenIddictClientHandlerType.BuiltIn)
-                .Build();
-
-        /// <inheritdoc/>
-        public ValueTask HandleAsync(ProcessAuthenticationContext context)
-        {
-            if (context is null)
-            {
-                throw new ArgumentNullException(nameof(context));
-            }
-
-            Debug.Assert(context.StateTokenPrincipal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
-
-            // Resolve the negotiated response type from the state token.
-            context.ResponseType = context.StateTokenPrincipal.GetClaim(Claims.Private.ResponseType);
-
             return default;
         }
     }
@@ -792,7 +945,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for determining the set of frontchannel tokens to validate.
     /// </summary>
-    public class EvaluateValidatedFrontchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class EvaluateValidatedFrontchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -800,7 +953,7 @@ public static partial class OpenIddictClientHandlers
         public static OpenIddictClientHandlerDescriptor Descriptor { get; }
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
                 .UseSingletonHandler<EvaluateValidatedFrontchannelTokens>()
-                .SetOrder(ResolveResponseTypeFromStateToken.Descriptor.Order + 1_000)
+                .SetOrder(ResolveGrantTypeAndResponseTypeFromStateToken.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
@@ -824,7 +977,9 @@ public static partial class OpenIddictClientHandlers
                 // Note: since authorization codes are supposed to be opaque to the clients, they are never
                 // validated by default. Clients that need to deal with non-standard implementations
                 // can use custom handlers to validate access tokens that use a readable format (e.g JWT).
-                GrantTypes.AuthorizationCode or GrantTypes.Implicit when HasResponseType(ResponseTypes.Code)
+                GrantTypes.AuthorizationCode or GrantTypes.Implicit when
+                    context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                    types.Contains(ResponseTypes.Code)
                     => (true, true, false),
 
                 _ => (false, false, false)
@@ -842,7 +997,9 @@ public static partial class OpenIddictClientHandlers
                 // Note: since access tokens are supposed to be opaque to the clients, they are never
                 // validated by default. Clients that need to deal with non-standard implementations
                 // can use custom handlers to validate access tokens that use a readable format (e.g JWT).
-                GrantTypes.AuthorizationCode or GrantTypes.Implicit when HasResponseType(ResponseTypes.Token)
+                GrantTypes.AuthorizationCode or GrantTypes.Implicit when
+                    context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                    types.Contains(ResponseTypes.Token)
                     => (true, true, false),
 
                 _ => (false, false, false)
@@ -859,22 +1016,22 @@ public static partial class OpenIddictClientHandlers
                 //
                 // Note: the granted scopes list (returned as a "scope" parameter in authorization
                 // responses) is not used in this case as it's not protected against tampering.
-                GrantTypes.AuthorizationCode or GrantTypes.Implicit when HasResponseType(ResponseTypes.IdToken)
+                GrantTypes.AuthorizationCode or GrantTypes.Implicit when
+                    context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                    types.Contains(ResponseTypes.IdToken)
                     => (true, true, true),
 
                 _ => (false, false, false)
             };
 
             return default;
-
-            bool HasResponseType(string value) => context.ResponseType!.Split(Separators.Space).Contains(value);
         }
     }
 
     /// <summary>
     /// Contains the logic responsible for resolving the token from the incoming request.
     /// </summary>
-    public class ResolveValidatedFrontchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ResolveValidatedFrontchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -925,7 +1082,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for rejecting authentication demands that lack required tokens.
     /// </summary>
-    public class ValidateRequiredFrontchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateRequiredFrontchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -966,7 +1123,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the frontchannel identity token resolved from the context.
     /// </summary>
-    public class ValidateFrontchannelIdentityToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateFrontchannelIdentityToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -1034,7 +1191,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the well-known claims contained in the frontchannel identity token.
     /// </summary>
-    public class ValidateFrontchannelIdentityTokenWellknownClaims : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateFrontchannelIdentityTokenWellknownClaims : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1148,11 +1305,7 @@ public static partial class OpenIddictClientHandlers
                 {
                     Key: Claims.Audience or Claims.AuthenticationMethodReference,
                     Value: List<Claim> values
-                } => values.Count switch
-                {
-                    1 => values[0].ValueType is ClaimValueTypes.String,
-                    _ => values.All(value => value.ValueType is ClaimValueTypes.String)
-                },
+                } => values.TrueForAll(static value => value.ValueType is ClaimValueTypes.String),
 
                 // The following JWT claims MUST be represented as unique numeric dates.
                 {
@@ -1171,7 +1324,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the audience returned in the frontchannel identity token, if applicable.
     /// </summary>
-    public class ValidateFrontchannelIdentityTokenAudience : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateFrontchannelIdentityTokenAudience : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1216,7 +1369,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the presenter returned in the frontchannel identity token, if applicable.
     /// </summary>
-    public class ValidateFrontchannelIdentityTokenPresenter : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateFrontchannelIdentityTokenPresenter : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1259,7 +1412,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the nonce returned in the frontchannel identity token, if applicable.
     /// </summary>
-    public class ValidateFrontchannelIdentityTokenNonce : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateFrontchannelIdentityTokenNonce : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1280,6 +1433,38 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
+            // Note: the OpenID Connect specification relies on nonces as a way to detect and
+            // prevent replay attacks by binding the returned identity token(s) to a specific
+            // random value sent by the client application as part of the authorization request.
+            //
+            // When Proof Key for Code Exchange is not supported or not available, nonces can
+            // also be used to detect authorization code or identity token injection attacks.
+            //
+            // For more information, see https://openid.net/specs/openid-connect-core-1_0.html#NonceNotes
+            // and https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#section-4.5.3.2.
+            //
+            // While OpenIddict fully implements nonce support, its implementation slightly
+            // differs from the implementation suggested by the OpenID Connect specification:
+            //
+            //   - Nonces are used internally as unique, per-authorization flow identifiers and
+            //     are always considered required when using an interactive flow, independently
+            //     of whether the authorization flow is an OAuth 2.0-only or OpenID Connect flow.
+            //
+            //   - Instead of being stored as separate cookies as suggested by the specification,
+            //     nonces are used by the ASP.NET Core and OWIN hosts to build a unique value
+            //     for the name of the correlation cookie used with state tokens to prevent CSRF,
+            //     which reduces the number of cookies used by the OpenIddict client web hosts.
+            //
+            //   - Nonces are attached to the authorization requests AND stored in the state
+            //     tokens so that the nonces and the state tokens form a 1 <-> 1 relationship,
+            //     which forces sending the matching state to be able to validate identity tokens.
+            //
+            //   - Replay detection is implemented by invalidating state tokens the very first time
+            //     they are presented at the redirection endpoint, even if the response indicates
+            //     an errored authorization response (e.g if the authorization demand was denied).
+            //     Since nonce validation depends on the value stored in the state token, marking
+            //     state tokens as already redeemed is enough to prevent nonces from being replayed.
+
             Debug.Assert(context.FrontchannelIdentityTokenPrincipal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
             Debug.Assert(context.StateTokenPrincipal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
 
@@ -1287,12 +1472,17 @@ public static partial class OpenIddictClientHandlers
                 FrontchannelIdentityTokenNonce: context.FrontchannelIdentityTokenPrincipal.GetClaim(Claims.Nonce),
                 StateTokenNonce: context.StateTokenPrincipal.GetClaim(Claims.Private.Nonce)))
             {
-                // If no nonce if no present in the state token (e.g because the authorization server doesn't
-                // support OpenID Connect and response_type=code was negotiated), bypass the validation logic.
+                // If no nonce is present in the state token, bypass the validation logic.
                 case { StateTokenNonce: null or { Length: not > 0 } }:
                     return default;
 
-                // If a nonce was found in the state token but is not present in the identity token, return an error.
+                // If the request was not an OpenID Connect request but an identity token
+                // was returned nethertheless, don't require a nonce to be present.
+                case { FrontchannelIdentityTokenNonce: null or { Length: not > 0 } }
+                    when !context.StateTokenPrincipal.HasScope(Scopes.OpenId):
+                    return default;
+
+                // If the nonce is not present in the identity token, return an error.
                 case { FrontchannelIdentityTokenNonce: null or { Length: not > 0 } }:
                     context.Reject(
                         error: Errors.InvalidRequest,
@@ -1303,11 +1493,12 @@ public static partial class OpenIddictClientHandlers
 
                 // If the two nonces don't match, return an error.
                 case { FrontchannelIdentityTokenNonce: string left, StateTokenNonce: string right } when
-#if SUPPORTS_TIME_CONSTANT_COMPARISONS
-                    !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right)):
-#else
-                    !Arrays.ConstantTimeAreEqual(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right)):
-#endif
+                    !OpenIddictHelpers.FixedTimeEquals(
+                        left:  MemoryMarshal.AsBytes(left.AsSpan()), // The nonce in the identity token is already hashed.
+                        right: MemoryMarshal.AsBytes(Base64UrlEncoder.Encode(
+                            OpenIddictHelpers.ComputeSha256Hash(Encoding.UTF8.GetBytes(right))).AsSpan())):
+                    context.Logger.LogWarning(SR.GetResourceString(SR.ID6210));
+
                     context.Reject(
                         error: Errors.InvalidRequest,
                         description: SR.FormatID2124(Claims.Nonce),
@@ -1323,7 +1514,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the digests of the frontchannel tokens, if applicable.
     /// </summary>
-    public class ValidateFrontchannelTokenDigests : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateFrontchannelTokenDigests : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1349,16 +1540,11 @@ public static partial class OpenIddictClientHandlers
             // claim cannot be found, it means the "alg" header of the identity token was
             // malformed but the token was still considered valid. While highly unlikly,
             // an exception is thrown in this case to abort the authentication demand.
-            var name = context.FrontchannelIdentityTokenPrincipal.GetClaim(Claims.Private.SigningAlgorithm);
-            if (string.IsNullOrEmpty(name))
+            var algorithm = context.FrontchannelIdentityTokenPrincipal.GetClaim(Claims.Private.SigningAlgorithm);
+            if (string.IsNullOrEmpty(algorithm))
             {
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0293));
             }
-
-            // Resolve the hash algorithm corresponding to the signing algorithm. If an
-            // instance of the BCL hash algorithm cannot be resolved, throw an exception.
-            using var algorithm = GetHashAlgorithm(name) ??
-                throw new InvalidOperationException(SR.GetResourceString(SR.ID0293));
 
             // If a frontchannel access token was returned in the authorization response,
             // ensure the at_hash claim matches the hash of the actual access token.
@@ -1414,44 +1600,38 @@ public static partial class OpenIddictClientHandlers
                 }
             }
 
-            static byte[] ComputeTokenHash(HashAlgorithm algorithm, string token)
+            static ReadOnlySpan<char> ComputeTokenHash(string algorithm, string token)
             {
-                // Note: only the left-most half of the access token and authorization code digest is used.
-                // See http://openid.net/specs/openid-connect-core-1_0.html#CodeIDToken for more information.
-                var digest = algorithm.ComputeHash(Encoding.ASCII.GetBytes(token));
+                // Resolve the hash algorithm associated with the signing algorithm and compute the token
+                // hash. If an instance of the BCL hash algorithm cannot be resolved, throw an exception.
+                var hash = algorithm switch
+                {
+                    SecurityAlgorithms.EcdsaSha256 or SecurityAlgorithms.HmacSha256 or
+                    SecurityAlgorithms.RsaSha256   or SecurityAlgorithms.RsaSsaPssSha256
+                        => OpenIddictHelpers.ComputeSha256Hash(Encoding.ASCII.GetBytes(token)),
 
-                return Encoding.ASCII.GetBytes(Base64UrlEncoder.Encode(digest, 0, digest.Length / 2));
+                    SecurityAlgorithms.EcdsaSha384 or SecurityAlgorithms.HmacSha384 or
+                    SecurityAlgorithms.RsaSha384   or SecurityAlgorithms.RsaSsaPssSha384
+                        => OpenIddictHelpers.ComputeSha384Hash(Encoding.ASCII.GetBytes(token)),
+
+                    SecurityAlgorithms.EcdsaSha512 or SecurityAlgorithms.HmacSha384 or
+                    SecurityAlgorithms.RsaSha512   or SecurityAlgorithms.RsaSsaPssSha512
+                        => OpenIddictHelpers.ComputeSha512Hash(Encoding.ASCII.GetBytes(token)),
+
+                    _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0293))
+                };
+
+                // Warning: only the left-most half of the access token and authorization code digest is used.
+                // See http://openid.net/specs/openid-connect-core-1_0.html#CodeIDToken for more information.
+                return Base64UrlEncoder.Encode(hash, 0, hash.Length / 2).AsSpan();
             }
 
-            static bool ValidateTokenHash(HashAlgorithm algorithm, string token, string hash) => 
-#if SUPPORTS_TIME_CONSTANT_COMPARISONS
-                CryptographicOperations.FixedTimeEquals(
-                    left: Encoding.ASCII.GetBytes(hash),
-                    right: ComputeTokenHash(algorithm, token));
-#else
-                Arrays.ConstantTimeAreEqual(
-                    a: Encoding.ASCII.GetBytes(hash),
-                    b: ComputeTokenHash(algorithm, token));
-#endif
+            static bool ValidateTokenHash(string algorithm, string token, string hash) =>
+                OpenIddictHelpers.FixedTimeEquals(
+                    left:  MemoryMarshal.AsBytes(hash.AsSpan()),
+                    right: MemoryMarshal.AsBytes(ComputeTokenHash(algorithm, token)));
 
             return default;
-
-            static HashAlgorithm? GetHashAlgorithm(string algorithm) => algorithm switch
-            {
-                SecurityAlgorithms.EcdsaSha256 or SecurityAlgorithms.HmacSha256 or
-                SecurityAlgorithms.RsaSha256   or SecurityAlgorithms.RsaSsaPssSha256
-                    => CryptoConfig.CreateFromName(SecurityAlgorithms.Sha256) as HashAlgorithm,
-
-                SecurityAlgorithms.EcdsaSha384 or SecurityAlgorithms.HmacSha384 or
-                SecurityAlgorithms.RsaSha384   or SecurityAlgorithms.RsaSsaPssSha384
-                    => CryptoConfig.CreateFromName(SecurityAlgorithms.Sha384) as HashAlgorithm,
-
-                SecurityAlgorithms.EcdsaSha512 or SecurityAlgorithms.HmacSha384 or
-                SecurityAlgorithms.RsaSha512   or SecurityAlgorithms.RsaSsaPssSha512
-                    => CryptoConfig.CreateFromName(SecurityAlgorithms.Sha512) as HashAlgorithm,
-
-                _ => null
-            };
         }
     }
 
@@ -1460,7 +1640,7 @@ public static partial class OpenIddictClientHandlers
     /// Note: this handler is typically not used for standard-compliant implementations as access tokens
     /// are supposed to be opaque to clients.
     /// </summary>
-    public class ValidateFrontchannelAccessToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateFrontchannelAccessToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -1530,7 +1710,7 @@ public static partial class OpenIddictClientHandlers
     /// Note: this handler is typically not used for standard-compliant implementations as authorization codes
     /// are supposed to be opaque to clients.
     /// </summary>
-    public class ValidateAuthorizationCode : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateAuthorizationCode : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -1598,7 +1778,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for resolving the address of the token endpoint.
     /// </summary>
-    public class ResolveTokenEndpoint : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ResolveTokenEndpoint : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1618,11 +1798,14 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
-            // Try to extract the address of the token endpoint from the server configuration.
-            if (context.Configuration.TokenEndpoint is { IsAbsoluteUri: true })
+            // If the address of the token endpoint wasn't explicitly set
+            // at this stage, try to extract it from the server configuration.
+            context.TokenEndpoint ??= context.Configuration.TokenEndpoint switch
             {
-                context.TokenEndpoint = context.Configuration.TokenEndpoint;
-            }
+                { IsAbsoluteUri: true } address when address.IsWellFormedOriginalString() => address,
+
+                _ => null
+            };
 
             return default;
         }
@@ -1631,7 +1814,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for determining whether a token request should be sent.
     /// </summary>
-    public class EvaluateTokenRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class EvaluateTokenRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1655,7 +1838,9 @@ public static partial class OpenIddictClientHandlers
             {
                 // For the authorization code and implicit grants, always send a token request
                 // if an authorization code was requested in the initial authorization request.
-                GrantTypes.AuthorizationCode or GrantTypes.Implicit when HasResponseType(ResponseTypes.Code)
+                GrantTypes.AuthorizationCode or GrantTypes.Implicit when
+                    context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                    types.Contains(ResponseTypes.Code)
                     => true,
 
                 // For client credentials, resource owner password credentials
@@ -1666,15 +1851,13 @@ public static partial class OpenIddictClientHandlers
             };
 
             return default;
-
-            bool HasResponseType(string value) => context.ResponseType!.Split(Separators.Space).Contains(value);
         }
     }
 
     /// <summary>
     /// Contains the logic responsible for attaching the parameters to the token request, if applicable.
     /// </summary>
-    public class AttachTokenRequestParameters : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class AttachTokenRequestParameters : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1712,6 +1895,14 @@ public static partial class OpenIddictClientHandlers
                 // For other values, don't do any mapping.
                 string type => type
             };
+
+            if (context.Scopes.Count > 0)
+            {
+                // Note: the final OAuth 2.0 specification requires using a space as the scope separator.
+                // Clients that need to deal with older or non-compliant implementations can register
+                // a custom handler to use a different separator (typically, a comma).
+                context.TokenRequest.Scope = string.Join(" ", context.Scopes);
+            }
 
             // If the token request uses an authorization code grant, retrieve the code_verifier and
             // the redirect_uri from the state token principal and attach them to the request, if available.
@@ -1751,7 +1942,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for selecting the token types that should
     /// be generated and optionally sent as part of the authentication demand.
     /// </summary>
-    public class EvaluateGeneratedClientAssertionToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class EvaluateGeneratedClientAssertionToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1792,7 +1983,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for preparing and attaching the claims principal
     /// used to generate the client assertion token, if one is going to be sent.
     /// </summary>
-    public class PrepareClientAssertionTokenPrincipal : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class PrepareClientAssertionTokenPrincipal : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1861,7 +2052,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for generating a client
     /// assertion token for the current authentication operation.
     /// </summary>
-    public class GenerateClientAssertionToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class GenerateClientAssertionToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -1933,7 +2124,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the client credentials to the token request, if applicable.
     /// </summary>
-    public class AttachTokenRequestClientCredentials : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class AttachTokenRequestClientCredentials : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -1981,7 +2172,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for sending the token request, if applicable.
     /// </summary>
-    public class SendTokenRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class SendTokenRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly OpenIddictClientService _service;
 
@@ -2015,54 +2206,28 @@ public static partial class OpenIddictClientHandlers
                 throw new InvalidOperationException(SR.FormatID0301(Metadata.TokenEndpoint));
             }
 
-            context.TokenResponse = await _service.SendTokenRequestAsync(
-                context.Registration, context.TokenEndpoint, context.TokenRequest);
-        }
-    }
-
-    /// <summary>
-    /// Contains the logic responsible for rejecting errored token responses.
-    /// </summary>
-    public class ValidateTokenErrorParameters : IOpenIddictClientHandler<ProcessAuthenticationContext>
-    {
-        /// <summary>
-        /// Gets the default descriptor definition assigned to this handler.
-        /// </summary>
-        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
-            = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
-                .AddFilter<RequireTokenRequest>()
-                .UseSingletonHandler<ValidateTokenErrorParameters>()
-                .SetOrder(SendTokenRequest.Descriptor.Order + 1_000)
-                .Build();
-
-        /// <inheritdoc/>
-        public ValueTask HandleAsync(ProcessAuthenticationContext context)
-        {
-            if (context is null)
+            try
             {
-                throw new ArgumentNullException(nameof(context));
+                context.TokenResponse = await _service.SendTokenRequestAsync(
+                    context.Registration, context.TokenRequest, context.TokenEndpoint);
             }
 
-            Debug.Assert(context.TokenResponse is not null, SR.GetResourceString(SR.ID4007));
-
-            if (!string.IsNullOrEmpty(context.TokenResponse.Error))
+            catch (ProtocolException exception)
             {
                 context.Reject(
-                    error: context.TokenResponse.Error,
-                    description: context.TokenResponse.ErrorDescription,
-                    uri: context.TokenResponse.ErrorUri);
+                    error: exception.Error,
+                    description: exception.ErrorDescription,
+                    uri: exception.ErrorUri);
 
-                return default;
+                return;
             }
-
-            return default;
         }
     }
 
     /// <summary>
     /// Contains the logic responsible for determining the set of backchannel tokens to validate.
     /// </summary>
-    public class EvaluateValidatedBackchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class EvaluateValidatedBackchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2071,7 +2236,7 @@ public static partial class OpenIddictClientHandlers
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
                 .AddFilter<RequireTokenRequest>()
                 .UseSingletonHandler<EvaluateValidatedBackchannelTokens>()
-                .SetOrder(ValidateTokenErrorParameters.Descriptor.Order + 1_000)
+                .SetOrder(SendTokenRequest.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
@@ -2094,7 +2259,9 @@ public static partial class OpenIddictClientHandlers
                  // Note: since access tokens are supposed to be opaque to the clients, they are never
                  // validated by default. Clients that need to deal with non-standard implementations
                  // can use custom handlers to validate access tokens that use a readable format (e.g JWT).
-                 GrantTypes.AuthorizationCode or GrantTypes.Implicit when HasResponseType(ResponseTypes.Code)
+                 GrantTypes.AuthorizationCode or GrantTypes.Implicit when
+                     context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                     types.Contains(ResponseTypes.Code)
                      => (true, true, false),
 
                  // An access token is always returned as part of client credentials,
@@ -2113,8 +2280,11 @@ public static partial class OpenIddictClientHandlers
                  // hybrid flows when the authorization server supports OpenID Connect. As such,
                  // a backchannel identity token is only considered required if the negotiated scopes
                  // include "openid", which indicates the initial request was an OpenID Connect request.
-                 GrantTypes.AuthorizationCode or GrantTypes.Implicit when HasResponseType(ResponseTypes.Code) &&
-                     context.StateTokenPrincipal!.HasScope(Scopes.OpenId) => (true, true, true),
+                 GrantTypes.AuthorizationCode or GrantTypes.Implicit when
+                     context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                     types.Contains(ResponseTypes.Code) &&
+                     context.StateTokenPrincipal is ClaimsPrincipal principal &&
+                     principal.HasScope(Scopes.OpenId) => (true, true, true),
 
                  // The client credentials and resource owner password credentials grants don't have
                  // an equivalent in OpenID Connect so an identity token is typically never returned
@@ -2145,29 +2315,29 @@ public static partial class OpenIddictClientHandlers
                  // Note: since refresh tokens are supposed to be opaque to the clients, they are never
                  // validated by default. Clients that need to deal with non-standard implementations
                  // can use custom handlers to validate access tokens that use a readable format (e.g JWT).
-                 GrantTypes.AuthorizationCode or GrantTypes.Implicit when HasResponseType(ResponseTypes.Code)
-                    => (true, false, false),
+                 GrantTypes.AuthorizationCode or GrantTypes.Implicit when
+                     context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                     types.Contains(ResponseTypes.Code)
+                     => (true, false, false),
 
                  // A refresh token may or may not be returned as part of client credentials,
                  // resource owner password credentials and refresh token responses depending
                  // on the policy adopted by the remote authorization server. As such, a
                  // refresh token is never considered required for such token responses.
                  GrantTypes.ClientCredentials or GrantTypes.Password or GrantTypes.RefreshToken
-                    => (true, false, false),
+                     => (true, false, false),
 
                  _ => (false, false, false)
              };
 
             return default;
-
-            bool HasResponseType(string value) => context.ResponseType!.Split(Separators.Space).Contains(value);
         }
     }
 
     /// <summary>
     /// Contains the logic responsible for resolving the backchannel tokens by sending a token request, if applicable.
     /// </summary>
-    public class ResolveValidatedBackchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ResolveValidatedBackchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2214,7 +2384,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for rejecting authentication demands that lack required tokens.
     /// </summary>
-    public class ValidateRequiredBackchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateRequiredBackchannelTokens : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2256,7 +2426,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the backchannel identity token resolved from the context.
     /// </summary>
-    public class ValidateBackchannelIdentityToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateBackchannelIdentityToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -2324,7 +2494,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the well-known claims contained in the backchannel identity token.
     /// </summary>
-    public class ValidateBackchannelIdentityTokenWellknownClaims : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateBackchannelIdentityTokenWellknownClaims : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2438,11 +2608,7 @@ public static partial class OpenIddictClientHandlers
                 {
                     Key: Claims.Audience or Claims.AuthenticationMethodReference,
                     Value: List<Claim> values
-                } => values.Count switch
-                {
-                    1 => values[0].ValueType is ClaimValueTypes.String,
-                    _ => values.All(value => value.ValueType is ClaimValueTypes.String)
-                },
+                } => values.TrueForAll(static value => value.ValueType is ClaimValueTypes.String),
 
                 // The following JWT claims MUST be represented as unique numeric dates.
                 {
@@ -2461,7 +2627,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the audience returned in the backchannel identity token, if applicable.
     /// </summary>
-    public class ValidateBackchannelIdentityTokenAudience : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateBackchannelIdentityTokenAudience : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2506,7 +2672,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the presenter returned in the backchannel identity token, if applicable.
     /// </summary>
-    public class ValidateBackchannelIdentityTokenPresenter : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateBackchannelIdentityTokenPresenter : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2549,7 +2715,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the nonce returned in the backchannel identity token, if applicable.
     /// </summary>
-    public class ValidateBackchannelIdentityTokenNonce : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateBackchannelIdentityTokenNonce : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2570,6 +2736,38 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
+            // Note: the OpenID Connect specification relies on nonces as a way to detect and
+            // prevent replay attacks by binding the returned identity token(s) to a specific
+            // random value sent by the client application as part of the authorization request.
+            //
+            // When Proof Key for Code Exchange is not supported or not available, nonces can
+            // also be used to detect authorization code or identity token injection attacks.
+            //
+            // For more information, see https://openid.net/specs/openid-connect-core-1_0.html#NonceNotes
+            // and https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#section-4.5.3.2.
+            //
+            // While OpenIddict fully implements nonce support, its implementation slightly
+            // differs from the implementation suggested by the OpenID Connect specification:
+            //
+            //   - Nonces are used internally as unique, per-authorization flow identifiers and
+            //     are always considered required when using an interactive flow, independently
+            //     of whether the authorization flow is an OAuth 2.0-only or OpenID Connect flow.
+            //
+            //   - Instead of being stored as separate cookies as suggested by the specification,
+            //     nonces are used by the ASP.NET Core and OWIN hosts to build a unique value
+            //     for the name of the correlation cookie used with state tokens to prevent CSRF,
+            //     which reduces the number of cookies used by the OpenIddict client web hosts.
+            //
+            //   - Nonces are attached to the authorization requests AND stored in the state
+            //     tokens so that the nonces and the state tokens form a 1 <-> 1 relationship,
+            //     which forces sending the matching state to be able to validate identity tokens.
+            //
+            //   - Replay detection is implemented by invalidating state tokens the very first time
+            //     they are presented at the redirection endpoint, even if the response indicates
+            //     an errored authorization response (e.g if the authorization demand was denied).
+            //     Since nonce validation depends on the value stored in the state token, marking
+            //     state tokens as already redeemed is enough to prevent nonces from being replayed.
+
             Debug.Assert(context.BackchannelIdentityTokenPrincipal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
             Debug.Assert(context.StateTokenPrincipal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
 
@@ -2577,12 +2775,17 @@ public static partial class OpenIddictClientHandlers
                 BackchannelIdentityTokenNonce: context.BackchannelIdentityTokenPrincipal.GetClaim(Claims.Nonce),
                 StateTokenNonce: context.StateTokenPrincipal.GetClaim(Claims.Private.Nonce)))
             {
-                // If no nonce if no present in the state token (e.g because the authorization server doesn't
-                // support OpenID Connect and response_type=code was negotiated), bypass the validation logic.
+                // If no nonce is present in the state token, bypass the validation logic.
                 case { StateTokenNonce: null or { Length: not > 0 } }:
                     return default;
 
-                // If a nonce was found in the state token but is not present in the identity token, return an error.
+                // If the request was not an OpenID Connect request but an identity token
+                // was returned nethertheless, don't require a nonce to be present.
+                case { BackchannelIdentityTokenNonce: null or { Length: not > 0 } }
+                    when !context.StateTokenPrincipal.HasScope(Scopes.OpenId):
+                    return default;
+
+                // If the nonce is not present in the identity token, return an error.
                 case { BackchannelIdentityTokenNonce: null or { Length: not > 0 } }:
                     context.Reject(
                         error: Errors.InvalidRequest,
@@ -2593,11 +2796,12 @@ public static partial class OpenIddictClientHandlers
 
                 // If the two nonces don't match, return an error.
                 case { BackchannelIdentityTokenNonce: string left, StateTokenNonce: string right } when
-#if SUPPORTS_TIME_CONSTANT_COMPARISONS
-                    !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right)):
-#else
-                    !Arrays.ConstantTimeAreEqual(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right)):
-#endif
+                    !OpenIddictHelpers.FixedTimeEquals(
+                        left:  MemoryMarshal.AsBytes(left.AsSpan()), // The nonce in the identity token is already hashed.
+                        right: MemoryMarshal.AsBytes(Base64UrlEncoder.Encode(
+                            OpenIddictHelpers.ComputeSha256Hash(Encoding.UTF8.GetBytes(right))).AsSpan())):
+                    context.Logger.LogWarning(SR.GetResourceString(SR.ID6211));
+
                     context.Reject(
                         error: Errors.InvalidRequest,
                         description: SR.FormatID2128(Claims.Nonce),
@@ -2613,7 +2817,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the digests of the backchannel access token.
     /// </summary>
-    public class ValidateBackchannelTokenDigests : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateBackchannelTokenDigests : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2640,16 +2844,11 @@ public static partial class OpenIddictClientHandlers
             // claim cannot be found, it means the "alg" header of the identity token was
             // malformed but the token was still considered valid. While highly unlikly,
             // an exception is thrown in this case to abort the authentication demand.
-            var name = context.BackchannelIdentityTokenPrincipal.GetClaim(Claims.Private.SigningAlgorithm);
-            if (string.IsNullOrEmpty(name))
+            var algorithm = context.BackchannelIdentityTokenPrincipal.GetClaim(Claims.Private.SigningAlgorithm);
+            if (string.IsNullOrEmpty(algorithm))
             {
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0295));
             }
-
-            // Resolve the hash algorithm corresponding to the signing algorithm. If an
-            // instance of the BCL hash algorithm cannot be resolved, throw an exception.
-            using var algorithm = GetHashAlgorithm(name) ??
-                throw new InvalidOperationException(SR.GetResourceString(SR.ID0295));
 
             // Note: the at_hash is optional for backchannel identity tokens returned from the token endpoint.
             // As such, the validation routine is only enforced if the at_hash claim is present in the token.
@@ -2668,44 +2867,38 @@ public static partial class OpenIddictClientHandlers
             // Note: unlike frontchannel identity tokens, backchannel identity tokens are not expected to include
             // an authorization code hash as no authorization code is normally returned from the token endpoint.
 
-            static byte[] ComputeTokenHash(HashAlgorithm algorithm, string token)
+            static ReadOnlySpan<char> ComputeTokenHash(string algorithm, string token)
             {
-                // Note: only the left-most half of the access token and authorization code digest is used.
-                // See http://openid.net/specs/openid-connect-core-1_0.html#CodeIDToken for more information.
-                var digest = algorithm.ComputeHash(Encoding.ASCII.GetBytes(token));
+                // Resolve the hash algorithm associated with the signing algorithm and compute the token
+                // hash. If an instance of the BCL hash algorithm cannot be resolved, throw an exception.
+                var hash = algorithm switch
+                {
+                    SecurityAlgorithms.EcdsaSha256 or SecurityAlgorithms.HmacSha256 or
+                    SecurityAlgorithms.RsaSha256   or SecurityAlgorithms.RsaSsaPssSha256
+                        => OpenIddictHelpers.ComputeSha256Hash(Encoding.ASCII.GetBytes(token)),
 
-                return Encoding.ASCII.GetBytes(Base64UrlEncoder.Encode(digest, 0, digest.Length / 2));
+                    SecurityAlgorithms.EcdsaSha384 or SecurityAlgorithms.HmacSha384 or
+                    SecurityAlgorithms.RsaSha384   or SecurityAlgorithms.RsaSsaPssSha384
+                        => OpenIddictHelpers.ComputeSha384Hash(Encoding.ASCII.GetBytes(token)),
+
+                    SecurityAlgorithms.EcdsaSha512 or SecurityAlgorithms.HmacSha384 or
+                    SecurityAlgorithms.RsaSha512   or SecurityAlgorithms.RsaSsaPssSha512
+                        => OpenIddictHelpers.ComputeSha512Hash(Encoding.ASCII.GetBytes(token)),
+
+                    _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0295))
+                };
+
+                // Warning: only the left-most half of the access token and authorization code digest is used.
+                // See http://openid.net/specs/openid-connect-core-1_0.html#CodeIDToken for more information.
+                return Base64UrlEncoder.Encode(hash, 0, hash.Length / 2).AsSpan();
             }
 
-            static bool ValidateTokenHash(HashAlgorithm algorithm, string token, string hash) =>
-#if SUPPORTS_TIME_CONSTANT_COMPARISONS
-                CryptographicOperations.FixedTimeEquals(
-                    left: Encoding.ASCII.GetBytes(hash),
-                    right: ComputeTokenHash(algorithm, token));
-#else
-                Arrays.ConstantTimeAreEqual(
-                    a: Encoding.ASCII.GetBytes(hash),
-                    b: ComputeTokenHash(algorithm, token));
-#endif
+            static bool ValidateTokenHash(string algorithm, string token, string hash) =>
+                OpenIddictHelpers.FixedTimeEquals(
+                    left:  MemoryMarshal.AsBytes(hash.AsSpan()),
+                    right: MemoryMarshal.AsBytes(ComputeTokenHash(algorithm, token)));
 
             return default;
-
-            static HashAlgorithm? GetHashAlgorithm(string algorithm) => algorithm switch
-            {
-                SecurityAlgorithms.EcdsaSha256 or SecurityAlgorithms.HmacSha256 or
-                SecurityAlgorithms.RsaSha256   or SecurityAlgorithms.RsaSsaPssSha256
-                    => CryptoConfig.CreateFromName(SecurityAlgorithms.Sha256) as HashAlgorithm,
-
-                SecurityAlgorithms.EcdsaSha384 or SecurityAlgorithms.HmacSha384 or
-                SecurityAlgorithms.RsaSha384   or SecurityAlgorithms.RsaSsaPssSha384
-                    => CryptoConfig.CreateFromName(SecurityAlgorithms.Sha384) as HashAlgorithm,
-
-                SecurityAlgorithms.EcdsaSha512 or SecurityAlgorithms.HmacSha384 or
-                SecurityAlgorithms.RsaSha512   or SecurityAlgorithms.RsaSsaPssSha512
-                    => CryptoConfig.CreateFromName(SecurityAlgorithms.Sha512) as HashAlgorithm,
-
-                _ => null
-            };
         }
     }
 
@@ -2714,7 +2907,7 @@ public static partial class OpenIddictClientHandlers
     /// Note: this handler is typically not used for standard-compliant implementations as access tokens
     /// are supposed to be opaque to clients.
     /// </summary>
-    public class ValidateBackchannelAccessToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateBackchannelAccessToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -2784,7 +2977,7 @@ public static partial class OpenIddictClientHandlers
     /// Note: this handler is typically not used for standard-compliant implementations as refresh tokens
     /// are supposed to be opaque to clients.
     /// </summary>
-    public class ValidateRefreshToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateRefreshToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -2852,7 +3045,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for resolving the address of the userinfo endpoint.
     /// </summary>
-    public class ResolveUserinfoEndpoint : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ResolveUserinfoEndpoint : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2872,11 +3065,14 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
-            // Try to extract the address of the userinfo endpoint from the server configuration.
-            if (context.Configuration.UserinfoEndpoint is { IsAbsoluteUri: true })
+            // If the address of the userinfo endpoint wasn't explicitly set
+            // at this stage, try to extract it from the server configuration.
+            context.UserinfoEndpoint ??= context.Configuration.UserinfoEndpoint switch
             {
-                context.UserinfoEndpoint = context.Configuration.UserinfoEndpoint;
-            }
+                { IsAbsoluteUri: true } address when address.IsWellFormedOriginalString() => address,
+
+                _ => null
+            };
 
             return default;
         }
@@ -2885,7 +3081,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for determining whether a userinfo request should be sent.
     /// </summary>
-    public class EvaluateUserinfoRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class EvaluateUserinfoRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2927,7 +3123,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the parameters to the userinfo request, if applicable.
     /// </summary>
-    public class AttachUserinfoRequestParameters : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class AttachUserinfoRequestParameters : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -2962,7 +3158,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for sending the userinfo request, if applicable.
     /// </summary>
-    public class SendUserinfoRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class SendUserinfoRequest : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly OpenIddictClientService _service;
 
@@ -3000,54 +3196,28 @@ public static partial class OpenIddictClientHandlers
             //  - application/json responses containing a JSON object listing the user claims as-is.
             //  - application/jwt responses containing a signed/encrypted JSON Web Token containing the user claims.
 
-            (context.UserinfoResponse, (context.UserinfoTokenPrincipal, context.UserinfoToken)) =
-                await _service.SendUserinfoRequestAsync(context.Registration, context.UserinfoEndpoint, context.UserinfoRequest);
-        }
-    }
-
-    /// <summary>
-    /// Contains the logic responsible for rejecting errored userinfo responses.
-    /// </summary>
-    public class ValidateUserinfoErrorParameters : IOpenIddictClientHandler<ProcessAuthenticationContext>
-    {
-        /// <summary>
-        /// Gets the default descriptor definition assigned to this handler.
-        /// </summary>
-        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
-            = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
-                .AddFilter<RequireUserinfoRequest>()
-                .UseSingletonHandler<ValidateUserinfoErrorParameters>()
-                .SetOrder(SendUserinfoRequest.Descriptor.Order + 1_000)
-                .Build();
-
-        /// <inheritdoc/>
-        public ValueTask HandleAsync(ProcessAuthenticationContext context)
-        {
-            if (context is null)
+            try
             {
-                throw new ArgumentNullException(nameof(context));
+                (context.UserinfoResponse, (context.UserinfoTokenPrincipal, context.UserinfoToken)) =
+                    await _service.SendUserinfoRequestAsync(context.Registration, context.UserinfoRequest, context.UserinfoEndpoint);
             }
 
-            Debug.Assert(context.UserinfoResponse is not null, SR.GetResourceString(SR.ID4007));
-
-            if (!string.IsNullOrEmpty(context.UserinfoResponse.Error))
+            catch (ProtocolException exception)
             {
                 context.Reject(
-                    error: context.UserinfoResponse.Error,
-                    description: context.UserinfoResponse.ErrorDescription,
-                    uri: context.UserinfoResponse.ErrorUri);
+                    error: exception.Error,
+                    description: exception.ErrorDescription,
+                    uri: exception.ErrorUri);
 
-                return default;
+                return;
             }
-
-            return default;
         }
     }
 
     /// <summary>
     /// Contains the logic responsible for determining whether a userinfo token should be validated.
     /// </summary>
-    public class EvaluateValidatedUserinfoToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class EvaluateValidatedUserinfoToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3056,7 +3226,7 @@ public static partial class OpenIddictClientHandlers
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessAuthenticationContext>()
                 .AddFilter<RequireUserinfoRequest>()
                 .UseSingletonHandler<EvaluateValidatedUserinfoToken>()
-                .SetOrder(ValidateUserinfoErrorParameters.Descriptor.Order + 1_000)
+                .SetOrder(SendUserinfoRequest.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
@@ -3081,7 +3251,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for rejecting authentication demands that lack the required userinfo token.
     /// </summary>
-    public class ValidateRequiredUserinfoToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateRequiredUserinfoToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3120,7 +3290,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the userinfo token resolved from the context.
     /// </summary>
-    public class ValidateUserinfoToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateUserinfoToken : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -3188,7 +3358,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the well-known claims contained in the userinfo token.
     /// </summary>
-    public class ValidateUserinfoTokenWellknownClaims : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateUserinfoTokenWellknownClaims : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3254,7 +3424,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for validating the subject claim contained in the userinfo token.
     /// </summary>
-    public class ValidateUserinfoTokenSubject : IOpenIddictClientHandler<ProcessAuthenticationContext>
+    public sealed class ValidateUserinfoTokenSubject : IOpenIddictClientHandler<ProcessAuthenticationContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3333,7 +3503,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for rejecting invalid challenge demands.
     /// </summary>
-    public class ValidateChallengeDemand : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class ValidateChallengeDemand : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3358,11 +3528,46 @@ public static partial class OpenIddictClientHandlers
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0006));
             }
 
-            // If an explicit grant type was specified, ensure it is supported by OpenIddict.
-            if (!string.IsNullOrEmpty(context.GrantType) &&
-                context.GrantType is not (GrantTypes.AuthorizationCode or GrantTypes.Implicit))
+            // If an explicit grant type was specified, ensure it is
+            // supported by OpenIddict and enabled in the client options.
+            if (!string.IsNullOrEmpty(context.GrantType))
             {
-                throw new InvalidOperationException(SR.GetResourceString(SR.ID0296));
+                if (context.GrantType is not (GrantTypes.AuthorizationCode or GrantTypes.Implicit))
+                {
+                    throw new InvalidOperationException(SR.GetResourceString(SR.ID0296));
+                }
+
+                if (!context.Options.GrantTypes.Contains(context.GrantType))
+                {
+                    throw new InvalidOperationException(SR.FormatID0359(context.GrantType));
+                }
+            }
+
+            // Ensure signing/and encryption credentials are present as they are required to protect state tokens.
+            if (context.Options.EncryptionCredentials.Count is 0)
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0357));
+            }
+
+            if (context.Options.SigningCredentials.Count is 0)
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0358));
+            }
+
+            // If a provider name was specified, resolve the corresponding issuer.
+            if (!string.IsNullOrEmpty(context.ProviderName))
+            {
+                var registration = context.Options.Registrations.Find(registration => string.Equals(
+                    registration.ProviderName, context.ProviderName, StringComparison.Ordinal)) ??
+                    throw new InvalidOperationException(SR.GetResourceString(SR.ID0348));
+
+                // If an explicit issuer was also attached, ensure the two values point to the same instance.
+                if (context.Issuer is not null && context.Issuer != registration.Issuer)
+                {
+                    throw new InvalidOperationException(SR.GetResourceString(SR.ID0349));
+                }
+
+                context.Issuer = registration.Issuer;
             }
 
             // If no issuer was explicitly attached and a single client is registered, use it.
@@ -3382,7 +3587,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for resolving the client registration applicable to the challenge demand.
     /// </summary>
-    public class ResolveClientRegistrationFromChallengeContext : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class ResolveClientRegistrationFromChallengeContext : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3405,36 +3610,34 @@ public static partial class OpenIddictClientHandlers
             // Note: if the static registration cannot be found in the options, this may indicate
             // the client was removed after the authorization dance started and thus, can no longer
             // be used to authenticate users. In this case, throw an exception to abort the flow.
-            context.Registration = context.Options.Registrations.Find(
+            context.Registration ??= context.Options.Registrations.Find(
                 registration => registration.Issuer == context.Issuer) ??
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0292));
 
-            // Resolve and attach the server configuration to the context.
-            var configuration = await context.Registration.ConfigurationManager.GetConfigurationAsync(default) ??
+            // Resolve and attach the server configuration to the context if none has been set already.
+            context.Configuration ??= await context.Registration.ConfigurationManager.GetConfigurationAsync(default) ??
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0140));
 
             // Ensure the issuer resolved from the configuration matches the expected value.
-            if (configuration.Issuer != context.Issuer)
+            if (context.Configuration.Issuer != context.Issuer)
             {
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0307));
             }
-
-            context.Configuration = configuration;
         }
     }
 
     /// <summary>
-    /// Contains the logic responsible for resolving the best grant type
+    /// Contains the logic responsible for negotiating the best flow
     /// supported by both the client and the authorization server.
     /// </summary>
-    public class AttachGrantType : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachGrantTypeAndResponseType : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
         /// </summary>
         public static OpenIddictClientHandlerDescriptor Descriptor { get; }
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
-                .UseSingletonHandler<AttachGrantType>()
+                .UseSingletonHandler<AttachGrantTypeAndResponseType>()
                 .SetOrder(ResolveClientRegistrationFromChallengeContext.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
@@ -3447,59 +3650,193 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
-            // If an explicit grant type was specified, don't overwrite it.
-            if (!string.IsNullOrEmpty(context.GrantType))
+            // If an explicit grant or response type was specified, don't overwrite it.
+            if (!string.IsNullOrEmpty(context.GrantType) || !string.IsNullOrEmpty(context.ResponseType))
             {
                 return default;
             }
 
-            // Note: if no grant type was explicitly returned as part of the server configuration,
-            // the identity provider is assumed to at least support both the authorization code
-            // and the implicit grants, as defined by the discovery specifications. In this case,
-            // the authorization code grant is generally preferred as it offers the broadest
-            // support and the best level of security thanks to additional features like
-            // client authentication, code binding and access token injections mitigations.
-            // See https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata
-            // and https://datatracker.ietf.org/doc/html/rfc8414#section-2 for more information.
+            // In OAuth 2.0/OpenID Connect, the concept of "flow" is actually a quite complex combination
+            // of a grant type and a response type (that can include multiple, space-separated values).
+            //
+            // While the authorization code flow has a unique grant type/response type combination, more
+            // complex flows like the hybrid flow have many valid grant type/response types combinations.
+            //
+            // To evaluate whether a specific flow can be used, both the grant types and response types
+            // MUST be analyzed to find standard combinations that are supported by the both the client
+            // and the authorization server.
 
-            context.GrantType = (context.Registration.GrantTypes, context.Configuration.GrantTypesSupported) switch
+            (context.GrantType, context.ResponseType) = (
+                Client: (
+                    // Note: if grant types are explicitly listed in the client registration, only use
+                    // the grant types that are both listed and enabled in the global client options.
+                    // Otherwise, always default to the grant types that have been enabled globally.
+                    GrantTypes: context.Registration.GrantTypes.Count switch
+                    {
+                        0 => context.Options.GrantTypes as ICollection<string>,
+                        _ => context.Options.GrantTypes.Intersect(context.Registration.GrantTypes, StringComparer.Ordinal).ToList()
+                    },
+
+                    // Note: if response types are explicitly listed in the client registration, only use
+                    // the response types that are both listed and enabled in the global client options.
+                    // Otherwise, always default to the response types that have been enabled globally.
+                    ResponseTypes: context.Registration.ResponseTypes.Count switch
+                    {
+                        0 => context.Options.ResponseTypes.Select(types => types
+                                .Split(Separators.Space, StringSplitOptions.None)
+                                .ToHashSet(StringComparer.Ordinal))
+                            .ToList(),
+
+                        _ => context.Options.ResponseTypes.Select(types => types
+                                .Split(Separators.Space, StringSplitOptions.None)
+                                .ToHashSet(StringComparer.Ordinal))
+                            .Where(types => context.Registration.ResponseTypes.Any(value => value
+                                .Split(Separators.Space, StringSplitOptions.None)
+                                .ToHashSet(StringComparer.Ordinal)
+                                .SetEquals(types)))
+                            .ToList()
+                    }),
+
+                Server: (
+                    GrantTypes: context.Configuration.GrantTypesSupported,
+
+                    ResponseTypes: context.Configuration.ResponseTypesSupported
+                        .Select(types => types
+                            .Split(Separators.Space, StringSplitOptions.None)
+                            .ToHashSet(StringComparer.Ordinal))
+                        .ToList())) switch
             {
-                // If neither the client nor the server specify a list of grant types,
-                // use the authorization code grant, as it's always supported by default.
-                ({ Count: 0 }, { Count: 0 }) => GrantTypes.AuthorizationCode,
+                // Note: if no grant type was explicitly returned as part of the server configuration,
+                // the identity provider is assumed to implicitly support both the authorization code
+                // and the implicit grants, as stated by the OAuth 2.0/OIDC discovery specifications.
+                //
+                // See https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata
+                // and https://datatracker.ietf.org/doc/html/rfc8414#section-2 for more information.
 
-                // If the client supports the code grant and the server doesn't specify a list of
-                // grant types, use the authorization code grant, as it's always supported by default.
-                ({ Count: > 0 } client, { Count: 0 }) when client.Contains(GrantTypes.AuthorizationCode)
-                    => GrantTypes.AuthorizationCode,
+                // Note: response_type=code is always tested first as it doesn't require using
+                // response_mode=form_post or response_mode=fragment: fragment doesn't natively work with
+                // server-side clients and form_post is impacted by the same-site cookies restrictions
+                // that are now enforced by most browser vendors, which requires using SameSite=None for
+                // response_mode=form_post to work correctly. While it doesn't have native protection
+                // against mix-up attacks (due to the missing id_token in the authorization response),
+                // the code flow remains the best compromise and thus always comes first in the list.
 
-                // If the client supports the code grant and the server doesn't specify a list of
-                // grant types, use the authorization code grant, as it's always supported by default.
-                ({ Count: 0 }, { Count: > 0 } server) when server.Contains(GrantTypes.AuthorizationCode)
-                    => GrantTypes.AuthorizationCode,
+                // Authorization code flow with grant_type=authorization_code and response_type=code:
+                (var client, var server) when
+                    // Ensure grant_type=authorization_code is - explicitly or implicitly - supported.
+                    client.GrantTypes.Contains(GrantTypes.AuthorizationCode) &&
+                   (server.GrantTypes.Count is 0 || // If empty, assume the code grant is supported by the server.
+                    server.GrantTypes.Contains(GrantTypes.AuthorizationCode)) &&
 
-                // If both the client and the server support the code grant, prefer it over the implicit grant.
-                ({ Count: > 0 } client, { Count: > 0 } server) when
-                    server.Contains(GrantTypes.AuthorizationCode) && client.Contains(GrantTypes.AuthorizationCode)
-                    => GrantTypes.AuthorizationCode,
+                    // Ensure response_type=code is supported.
+                    client.ResponseTypes.Exists(static types => types.Count is 1 && types.Contains(ResponseTypes.Code)) &&
+                    server.ResponseTypes.Exists(static types => types.Count is 1 && types.Contains(ResponseTypes.Code))
 
-                // If the client supports the implicit grant and the server doesn't specify a list
-                // of grant types, use the implicit code grant, as it's always supported by default.
-                ({ Count: > 0 } client, { Count: 0 }) when client.Contains(GrantTypes.Implicit)
-                    => GrantTypes.Implicit,
+                     => (GrantTypes.AuthorizationCode, ResponseTypes.Code),
 
-                // If the client supports the implicit grant and the server doesn't specify a list
-                // of grant types, use the implicit code grant, as it's always supported by default.
-                ({ Count: 0 }, { Count: > 0 } server) when server.Contains(GrantTypes.Implicit)
-                    => GrantTypes.Implicit,
+                // Hybrid flow with grant_type=authorization_code/implicit and response_type=code id_token:
+                (var client, var server) when
+                    // Ensure grant_type=authorization_code is - explicitly or implicitly - supported.
+                    (client.GrantTypes.Contains(GrantTypes.AuthorizationCode) && client.GrantTypes.Contains(GrantTypes.Implicit)) &&
+                    (server.GrantTypes.Count is 0 || // If empty, assume the code and implicit grants are supported by the server.
+                    (server.GrantTypes.Contains(GrantTypes.AuthorizationCode) && server.GrantTypes.Contains(GrantTypes.Implicit))) &&
 
-                // If both the client and the server support the implicit grant, use it as a last chance option.
-                ({ Count: > 0 } client, { Count: > 0 } server) when
-                    server.Contains(GrantTypes.Implicit) && client.Contains(GrantTypes.Implicit)
-                    => GrantTypes.Implicit,
+                    // Ensure response_type=code id_token is supported.
+                    client.ResponseTypes.Exists(static types => types.Count is 2 && types.Contains(ResponseTypes.Code)     &&
+                                                                                    types.Contains(ResponseTypes.IdToken)) &&
+                    server.ResponseTypes.Exists(static types => types.Count is 2 && types.Contains(ResponseTypes.Code)     &&
+                                                                                    types.Contains(ResponseTypes.IdToken))
 
-                // If no common grant type can be negotiated, abort the challenge operation.
-                _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0297))
+                    => (GrantTypes.AuthorizationCode, ResponseTypes.Code + ' ' + ResponseTypes.IdToken),
+
+                // Implicit flow with grant_type=implicit and response_type=id_token:
+                (var client, var server) when
+                    // Ensure grant_type=implicit is - explicitly or implicitly - supported.
+                    client.GrantTypes.Contains(GrantTypes.Implicit) &&
+                   (server.GrantTypes.Count is 0 || // If empty, assume the implicit grant is supported by the server.
+                    server.GrantTypes.Contains(GrantTypes.Implicit)) &&
+
+                    // Ensure response_type=id_token is supported.
+                    client.ResponseTypes.Exists(static types => types.Count is 1 && types.Contains(ResponseTypes.IdToken)) &&
+                    server.ResponseTypes.Exists(static types => types.Count is 1 && types.Contains(ResponseTypes.IdToken))
+
+                     => (GrantTypes.Implicit, ResponseTypes.IdToken),
+
+                // Note: response types combinations containing "token" are always tested last as some
+                // authorization servers - like OpenIddict - are known to block authorization requests
+                // asking for an access token if Proof Key for Code Exchange is used in the same request.
+                //
+                // Returning an identity token directly from the authorization endpoint also has privacy
+                // concerns that code-based flows - that require a backchannel request - typically don't
+                // have when the client application (confidential or public) is executed on a server.
+
+                // Hybrid flow with grant_type=authorization_code/implicit and response_type=code id_token token.
+                (var client, var server) when
+                    // Ensure grant_type=authorization_code is - explicitly or implicitly - supported.
+                    (client.GrantTypes.Contains(GrantTypes.AuthorizationCode) && client.GrantTypes.Contains(GrantTypes.Implicit)) &&
+                    (server.GrantTypes.Count is 0 || // If empty, assume the code and implicit grants are supported by the server.
+                    (server.GrantTypes.Contains(GrantTypes.AuthorizationCode) && server.GrantTypes.Contains(GrantTypes.Implicit))) &&
+
+                    // Ensure response_type=code id_token token is supported.
+                    client.ResponseTypes.Exists(static types => types.Count is 3 && types.Contains(ResponseTypes.Code)    &&
+                                                                                    types.Contains(ResponseTypes.IdToken) &&
+                                                                                    types.Contains(ResponseTypes.Token))  &&
+                    server.ResponseTypes.Exists(static types => types.Count is 3 && types.Contains(ResponseTypes.Code)    &&
+                                                                                    types.Contains(ResponseTypes.IdToken) &&
+                                                                                    types.Contains(ResponseTypes.Token))
+
+                    => (GrantTypes.AuthorizationCode, ResponseTypes.Code + ' ' + ResponseTypes.IdToken + ' ' + ResponseTypes.Token),
+
+                // Hybrid flow with grant_type=authorization_code/implicit and response_type=code token.
+                (var client, var server) when
+                    // Ensure grant_type=authorization_code is - explicitly or implicitly - supported.
+                    (client.GrantTypes.Contains(GrantTypes.AuthorizationCode) && client.GrantTypes.Contains(GrantTypes.Implicit)) &&
+                    (server.GrantTypes.Count is 0 || // If empty, assume the code and implicit grants are supported by the server.
+                    (server.GrantTypes.Contains(GrantTypes.AuthorizationCode) && server.GrantTypes.Contains(GrantTypes.Implicit))) &&
+
+                    // Ensure response_type=code token is supported.
+                    client.ResponseTypes.Exists(static types => types.Count is 2 && types.Contains(ResponseTypes.Code)   &&
+                                                                                    types.Contains(ResponseTypes.Token)) &&
+                    server.ResponseTypes.Exists(static types => types.Count is 2 && types.Contains(ResponseTypes.Code)   &&
+                                                                                    types.Contains(ResponseTypes.Token))
+
+                    => (GrantTypes.AuthorizationCode, ResponseTypes.Code + ' ' + ResponseTypes.Token),
+
+
+                // Implicit flow with grant_type=implicit and response_type=id_token token.
+                (var client, var server) when
+                    // Ensure grant_type=implicit is - explicitly or implicitly - supported.
+                    client.GrantTypes.Contains(GrantTypes.Implicit) &&
+                   (server.GrantTypes.Count is 0 || // If empty, assume the implicit grant is supported by the server.
+                    server.GrantTypes.Contains(GrantTypes.Implicit)) &&
+
+                    // Ensure response_type=code token is supported.
+                    client.ResponseTypes.Exists(static types => types.Count is 2 && types.Contains(ResponseTypes.IdToken) &&
+                                                                                    types.Contains(ResponseTypes.Token))  &&
+                    server.ResponseTypes.Exists(static types => types.Count is 2 && types.Contains(ResponseTypes.IdToken) &&
+                                                                                    types.Contains(ResponseTypes.Token))
+
+                    => (GrantTypes.Implicit, ResponseTypes.IdToken + ' ' + ResponseTypes.Token),
+
+                // None flow with response_type=none.
+                (var client, var server) when
+                    // Ensure response_type=none is supported.
+                    client.ResponseTypes.Exists(static types => types.Count is 1 && types.Contains(ResponseTypes.None)) &&
+                    server.ResponseTypes.Exists(static types => types.Count is 1 && types.Contains(ResponseTypes.None))
+
+                    => (null, ResponseTypes.None),
+
+                // Note: this check is only enforced after the none flow was excluded as it doesn't use a grant type.
+                (var client, _) when client.GrantTypes.Count is 0
+                    => throw new InvalidOperationException(SR.GetResourceString(SR.ID0360)),
+
+                (var client, _) when client.ResponseTypes.Count is 0
+                    => throw new InvalidOperationException(SR.GetResourceString(SR.ID0361)),
+
+                (_, var server) when server.ResponseTypes.Count is 0
+                    => throw new InvalidOperationException(SR.GetResourceString(SR.ID0297)),
+
+                _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0298))
             };
 
             return default;
@@ -3510,7 +3847,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for selecting the token types that
     /// should be generated and optionally returned in the response.
     /// </summary>
-    public class EvaluateGeneratedChallengeTokens : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class EvaluateGeneratedChallengeTokens : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3518,7 +3855,7 @@ public static partial class OpenIddictClientHandlers
         public static OpenIddictClientHandlerDescriptor Descriptor { get; }
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
                 .UseSingletonHandler<EvaluateGeneratedChallengeTokens>()
-                .SetOrder(AttachGrantType.Descriptor.Order + 1_000)
+                .SetOrder(AttachGrantTypeAndResponseType.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
@@ -3536,13 +3873,14 @@ public static partial class OpenIddictClientHandlers
             // derive the code challenge sent to the remote authorization server. While not strictly
             // required by the OAuth 2.0/2.1 and OpenID Connect specifications, the state parameter is
             // considered essential in OpenIddict and as such, is always included in challenge demands
-            // that use the authorization code or implicit grants (which includes the hybrid flow).
+            // that use the authorization code, hybrid, implicit or the special "none" flows.
             //
             // See https://datatracker.ietf.org/doc/html/draft-bradley-oauth-jwt-encoded-state-09
             // for more information.
             (context.GenerateStateToken, context.IncludeStateToken) = context.GrantType switch
             {
-                GrantTypes.AuthorizationCode or GrantTypes.Implicit => (true, true),
+                GrantTypes.AuthorizationCode or GrantTypes.Implicit  => (true, true),
+                null when context.ResponseType is ResponseTypes.None => (true, true),
 
                 _ => (false, false)
             };
@@ -3552,18 +3890,18 @@ public static partial class OpenIddictClientHandlers
     }
 
     /// <summary>
-    /// Contains the logic responsible for attaching the response type to the challenge request.
+    /// Contains the logic responsible for attaching the user-defined properties to the authentication principal.
     /// </summary>
-    public class AttachResponseType : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachChallengeHostProperties : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
         /// </summary>
         public static OpenIddictClientHandlerDescriptor Descriptor { get; }
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
-                .AddFilter<RequireInteractiveGrantType>()
-                .UseSingletonHandler<AttachResponseType>()
+                .UseSingletonHandler<AttachChallengeHostProperties>()
                 .SetOrder(EvaluateGeneratedChallengeTokens.Descriptor.Order + 1_000)
+                .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
         /// <inheritdoc/>
@@ -3574,169 +3912,9 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
-            // If an explicit response type was specified, don't overwrite it.
-            if (!string.IsNullOrEmpty(context.ResponseType))
-            {
-                return default;
-            }
+            Debug.Assert(context.Principal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
 
-            context.ResponseType = (
-                context.GrantType,
-                context.Registration.ResponseTypes.Select(types => 
-                    types.Split(Separators.Space).ToImmutableHashSet(StringComparer.Ordinal)).ToList(),
-                context.Configuration.ResponseTypesSupported.Select(types =>
-                    types.Split(Separators.Space).ToImmutableHashSet(StringComparer.Ordinal)).ToList()) switch
-            {
-                // Note: the OAuth 2.0 provider metadata and OpenID Connect discovery specification define
-                // the supported response types as a required property. Nevertheless, to ensure OpenIddict
-                // is compatible with most identity providers, a missing or empty list is not treated as an
-                // error. In this case, response_type=code (for the code grant) and response_type=id_token
-                // (for the implicit grant) are assumed to be the most commonly supported values.
-                //
-                // Note: response_type=code is always tested first as it doesn't require using
-                // response_mode=form_post or response_mode=fragment: fragment doesn't natively work with
-                // server-side clients and form_post is impacted by the same-site cookies restrictions
-                // that are now enforced by most browser vendors, which requires using SameSite=None for
-                // response_mode=form_post to work correctly. While it doesn't have native protection
-                // against mix-up attacks (due to the missing id_token in the authorization response),
-                // the code flow remains the best compromise and thus always comes first in the list.
-                //
-                // Note: response types combinations containing "token" are always tested last as some
-                // authorization servers - like OpenIddict - are known to block authorization requests
-                // asking for an access token if Proof Key for Code Exchange is used in the same request.
-                // Returning an identity token directly from the authorization endpoint also has privacy
-                // concerns that code-based flows - that require a backchannel request - typically don't
-                // have when the client application (confidential or public) is executed on a server.
-
-                // If neither the client nor the server specify a list of response types,
-                // use "response_type=code", as it's the most commonly supported type.
-                (GrantTypes.AuthorizationCode, { Count: 0 }, { Count: 0 })
-                    => ResponseTypes.Code,
-
-                // If the client supports "response_type=code" and the server doesn't
-                // specify a list of response types, use "response_type=code".
-                (GrantTypes.AuthorizationCode, { Count: > 0 } client, { Count: 0 }) when
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code }))
-                    => ResponseTypes.Code,
-
-                // If the server supports "response_type=code" and the client doesn't
-                // specify a list of response types, use "response_type=code".
-                (GrantTypes.AuthorizationCode, { Count: 0 }, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code }))
-                    => ResponseTypes.Code,
-
-                // If both the client and the server support "response_type=code", use it.
-                (GrantTypes.AuthorizationCode, { Count: > 0 } client, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code })) &&
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code }))
-                    => ResponseTypes.Code,
-
-                // If the client supports "response_type=code id_token" and the server doesn't
-                // specify a list of response types, use "response_type=code id_token".
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: > 0 } client, { Count: 0 }) when
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.IdToken,
-
-                // If the server supports "response_type=code id_token" and the client doesn't
-                // specify a list of response types, use "response_type=code id_token".
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: 0 }, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.IdToken,
-
-                // If both the client and the server support "response_type=code id_token", use it.
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: > 0 } client, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken })) &&
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.IdToken,
-
-                // If neither the client nor the server specify a list of response types, use "response_type=id_token".
-                (GrantTypes.Implicit, { Count: 0 }, { Count: 0 })
-                    => ResponseTypes.IdToken,
-
-                // If the client supports "response_type=id_token" and the server doesn't
-                // specify a list of response types, use "response_type=id_token".
-                (GrantTypes.Implicit, { Count: > 0 } client, { Count: 0 }) when
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken }))
-                    => ResponseTypes.IdToken,
-
-                // If the server supports "response_type=id_token" and the client doesn't
-                // specify a list of response types, use "response_type=id_token".
-                (GrantTypes.Implicit, { Count: 0 }, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken }))
-                    => ResponseTypes.IdToken,
-
-                // If both the client and the server support "response_type=id_token", use it.
-                (GrantTypes.Implicit, { Count: > 0 } client, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken })) &&
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken }))
-                    => ResponseTypes.IdToken,
-
-                // If the client supports "response_type=code id_token token" and the server doesn't
-                // specify a list of response types, use "response_type=code id_token token".
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: > 0 } client, { Count: 0 }) when
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken, ResponseTypes.Token }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.IdToken + ' ' + ResponseTypes.Token,
-
-                // If the server supports "response_type=code id_token token" and the client doesn't
-                // specify a list of response types, use "response_type=code id_token token".
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: 0 }, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken, ResponseTypes.Token }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.IdToken + ' ' + ResponseTypes.Token,
-
-                // If both the client and the server support "response_type=code id_token token", use it.
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: > 0 } client, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken, ResponseTypes.Token })) &&
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.IdToken, ResponseTypes.Token }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.IdToken + ' ' + ResponseTypes.Token,
-
-                // If the client supports "response_type=code token" and the server doesn't
-                // specify a list of response types, use "response_type=code token".
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: > 0 } client, { Count: 0 }) when
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.Token }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.Token,
-
-                // If the server supports "response_type=code token" and the client doesn't
-                // specify a list of response types, use "response_type=code token".
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: 0 }, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.Token }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.Token,
-
-                // If both the client and the server support "response_type=code token", use it.
-                (GrantTypes.AuthorizationCode or GrantTypes.Implicit, { Count: > 0 } client, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.Token })) &&
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.Code, ResponseTypes.Token }))
-                    => ResponseTypes.Code + ' ' + ResponseTypes.Token,
-
-                // If the client supports "response_type=id_token token" and the server doesn't
-                // specify a list of response types, use "response_type=id_token token".
-                (GrantTypes.Implicit, { Count: > 0 } client, { Count: 0 }) when
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken, ResponseTypes.Token }))
-                    => ResponseTypes.IdToken + ' ' + ResponseTypes.Token,
-
-                // If the server supports "response_type=id_token token" and the client doesn't
-                // specify a list of response types, use "response_type=id_token token".
-                (GrantTypes.Implicit, { Count: 0 }, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken, ResponseTypes.Token }))
-                    => ResponseTypes.IdToken + ' ' + ResponseTypes.Token,
-
-                // If both the client and the server support "response_type=id_token token", use it.
-                (GrantTypes.Implicit, { Count: > 0 } client, { Count: > 0 } server) when
-                    server.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken, ResponseTypes.Token })) &&
-                    client.Any(static set => set.SetEquals(new[] { ResponseTypes.IdToken, ResponseTypes.Token }))
-                    => ResponseTypes.IdToken + ' ' + ResponseTypes.Token,
-
-                // Note: response_type=token is not considered secure enough as it allows malicious
-                // actors to inject access tokens that were initially issued to a different client.
-                // As such, while OpenIddict-based servers allow using response_type=token for backward
-                // compatibility with legacy clients, OpenIddict-based clients are deliberately not
-                // allowed to negotiate the unsafe and OAuth 2.0-only response_type=token flow.
-                //
-                // For more information, see https://datatracker.ietf.org/doc/html/rfc6749#section-10.16 and
-                // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics-19#section-2.1.2.
-
-                // If no common response type can be negotiated, abort the challenge operation.
-                _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0298))
-            };
+            context.Principal.SetClaim(Claims.Private.HostProperties, context.Properties);
 
             return default;
         }
@@ -3745,7 +3923,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the response mode to the challenge request.
     /// </summary>
-    public class AttachResponseMode : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachResponseMode : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3754,7 +3932,7 @@ public static partial class OpenIddictClientHandlers
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessChallengeContext>()
                 .AddFilter<RequireInteractiveGrantType>()
                 .UseSingletonHandler<AttachResponseMode>()
-                .SetOrder(AttachResponseType.Descriptor.Order + 1_000)
+                .SetOrder(AttachChallengeHostProperties.Descriptor.Order + 1_000)
                 .Build();
 
         /// <inheritdoc/>
@@ -3788,30 +3966,25 @@ public static partial class OpenIddictClientHandlers
             // can never be used with a response type containing id_token or token, as required by the OAuth 2.0
             // multiple response types specification. To prevent invalid combinations from being sent to the
             // remote server, the response types are taken into account when selecting the best response mode.
-            var types = context.ResponseType!.Split(Separators.Space).ToImmutableHashSet(StringComparer.Ordinal);
-
-            context.ResponseMode = (context.Registration.ResponseModes, context.Configuration.ResponseModesSupported) switch
+            if (context.ResponseType?.Split(Separators.Space) is not IList<string> { Count: > 0 } types)
             {
-                // If neither the client nor the server specify a list of response modes,
-                // use "response_mode=form_post" if the response types contain a value
-                // that prevents response_mode=query from being used (token/id_token).
-                ({ Count: 0 }, { Count: 0 }) when
-                    types.Contains(ResponseTypes.IdToken) || types.Contains(ResponseTypes.Token)
-                    => ResponseModes.FormPost,
+                return default;
+            }
 
-                // If the client support response_mode=form_post and the server doesn't
-                // specify a list of response modes, use it if the response types contain
-                // a value that prevents response_mode=query from being used (token/id_token).
-                ({ Count: > 0 } client, { Count: 0 }) when client.Contains(ResponseModes.FormPost) &&
-                    (types.Contains(ResponseTypes.IdToken) || types.Contains(ResponseTypes.Token))
-                    => ResponseModes.FormPost,
+            context.ResponseMode = (
+                // Note: if response modes are explicitly listed in the client registration, only use
+                // the response modes that are both listed and enabled in the global client options.
+                // Otherwise, always default to the response modes that have been enabled globally.
+                SupportedClientResponseModes: context.Registration.ResponseModes.Count switch
+                {
+                    0 => context.Options.ResponseModes as ICollection<string>,
+                    _ => context.Options.ResponseModes.Intersect(context.Registration.ResponseModes, StringComparer.Ordinal).ToList()
+                },
 
-                // If the server support response_mode=form_post and the server doesn't
-                // specify a list of response modes, use it if the response types contain
-                // a value that prevents response_mode=query from being used (token/id_token).
-                ({ Count: 0 }, { Count: > 0 } server) when server.Contains(ResponseModes.FormPost) &&
-                    (types.Contains(ResponseTypes.IdToken) || types.Contains(ResponseTypes.Token))
-                    => ResponseModes.FormPost,
+                SupportedServerResponseModes: context.Configuration.ResponseModesSupported) switch
+            {
+                // If the list of response modes supported by the client is empty, abort the challenge operation.
+                ({ Count: 0 }, { Count: _ }) => throw new InvalidOperationException(SR.GetResourceString(SR.ID0362)),
 
                 // If both the client and the server support response_mode=form_post, use it if the response
                 // types contain a value that prevents response_mode=query from being used (token/id_token).
@@ -3820,24 +3993,27 @@ public static partial class OpenIddictClientHandlers
                     (types.Contains(ResponseTypes.IdToken) || types.Contains(ResponseTypes.Token))
                     => ResponseModes.FormPost,
 
-                // If neither the client nor the server specify a list of response modes,
-                // use "response_mode=query" as a fallback as it's universally supported:
-                ({ Count: 0 }, { Count: 0 }) => ResponseModes.Query,
+                // If the client support response_mode=form_post and the server doesn't specify a list
+                // of response modes, assume it is supported and use it if the response types contain
+                // a value that prevents response_mode=query from being used (token/id_token).
+                ({ Count: > 0 } client, { Count: 0 }) when client.Contains(ResponseModes.FormPost) &&
+                    (types.Contains(ResponseTypes.IdToken) || types.Contains(ResponseTypes.Token))
+                    => ResponseModes.FormPost,
 
-                // If the client support response_mode=query and the server
-                // doesn't specify a list of response modes, use it:
-                ({ Count: > 0 } client, { Count: 0 }) when client.Contains(ResponseModes.Query)
-                    => ResponseModes.Query,
-
-                // If the server support response_mode=query and the client
-                // doesn't specify a list of response modes, use it:
-                ({ Count: 0 }, { Count: > 0 } server) when server.Contains(ResponseModes.Query)
-                    => ResponseModes.Query,
-
-                // If both the client and the server support response_mode=query, use it:
+                // If both the client and the server support response_mode=query, use it.
                 ({ Count: > 0 } client, { Count: > 0 } server) when
                     client.Contains(ResponseModes.Query) && server.Contains(ResponseModes.Query)
                     => ResponseModes.Query,
+
+                // If the client support response_mode=query and the server doesn't
+                // specify a list of response modes, assume it is supported.
+                ({ Count: > 0 } client, { Count: 0 }) when client.Contains(ResponseModes.Query)
+                    => ResponseModes.Query,
+
+                // If both the client and the server support response_mode=form_post, use it.
+                ({ Count: > 0 } client, { Count: > 0 } server) when
+                    client.Contains(ResponseModes.FormPost) && server.Contains(ResponseModes.FormPost)
+                    => ResponseModes.FormPost,
 
                 // If no common response mode can be negotiated, abort the challenge operation.
                 _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0299))
@@ -3850,7 +4026,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the client identifier to the challenge request.
     /// </summary>
-    public class AttachClientId : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachClientId : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3879,7 +4055,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the redirect_uri to the challenge request.
     /// </summary>
-    public class AttachRedirectUri : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachRedirectUri : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3912,7 +4088,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the scopes to the challenge request.
     /// </summary>
-    public class AttachScopes : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachScopes : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3957,7 +4133,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching a request forgery protection to the authorization request.
     /// </summary>
-    public class AttachRequestForgeryProtection : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachRequestForgeryProtection : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -3979,14 +4155,8 @@ public static partial class OpenIddictClientHandlers
 
             // Generate a new crypto-secure random identifier that will
             // be used as the non-guessable part of the state token.
-            var data = new byte[256 / 8];
-#if SUPPORTS_STATIC_RANDOM_NUMBER_GENERATOR_METHODS
-            RandomNumberGenerator.Fill(data);
-#else
-            using var generator = RandomNumberGenerator.Create();
-            generator.GetBytes(data);
-#endif
-            context.RequestForgeryProtection = Base64UrlEncoder.Encode(data);
+            context.RequestForgeryProtection = Base64UrlEncoder.Encode(
+                OpenIddictHelpers.CreateRandomArray(size: 256));
 
             return default;
         }
@@ -3995,7 +4165,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching a nonce to the authorization request.
     /// </summary>
-    public class AttachNonce : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachNonce : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4015,21 +4185,18 @@ public static partial class OpenIddictClientHandlers
                 throw new ArgumentNullException(nameof(context));
             }
 
-            // If the identity provider doesn't support OpenID Connect, don't attach a nonce.
-            if (!context.Configuration.ScopesSupported.Contains(Scopes.OpenId))
-            {
-                return default;
-            }
-
             // Generate a new crypto-secure random identifier that will be used as the nonce.
-            var data = new byte[256 / 8];
-#if SUPPORTS_STATIC_RANDOM_NUMBER_GENERATOR_METHODS
-            RandomNumberGenerator.Fill(data);
-#else
-            using var generator = RandomNumberGenerator.Create();
-            generator.GetBytes(data);
-#endif
-            context.Nonce = Base64UrlEncoder.Encode(data);
+            //
+            // Note: a nonce is always generated for interactive grants, independently of whether
+            // the request is an OpenID Connect request or not, as it's used to identify each
+            // authorization demand and is needed by the web hosts like ASP.NET Core and OWIN
+            // to resolve the name of the correlation cookie used to prevent forged requests.
+            //
+            // If the request is an OpenID Connect request, the nonce will also be hashed and
+            // attached to the authorization request so that the identity provider can bind
+            // the issued identity tokens to the generated value, which helps detect token
+            // replay (and authorization code injection attacks when PKCE is not available).
+            context.Nonce = Base64UrlEncoder.Encode(OpenIddictHelpers.CreateRandomArray(size: 256));
 
             return default;
         }
@@ -4038,7 +4205,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the code challenge parameters to the authorization request.
     /// </summary>
-    public class AttachCodeChallengeParameters : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachCodeChallengeParameters : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4061,33 +4228,38 @@ public static partial class OpenIddictClientHandlers
             // Don't attach a code challenge method if no authorization code is requested as some implementations
             // (like OpenIddict server) are known to eagerly block authorization requests that specify an invalid
             // code_challenge/code_challenge_method/response_type combination (e.g response_type=id_token).
-            if (!context.ResponseType!.Split(Separators.Space).Contains(ResponseTypes.Code))
+            var types = context.ResponseType?.Split(Separators.Space);
+            if (types is not { Length: > 0 } || !types.Contains(ResponseTypes.Code))
             {
                 return default;
             }
 
             context.CodeChallengeMethod ??= (
-                context.Registration.CodeChallengeMethods,
-                context.Configuration.CodeChallengeMethodsSupported) switch
+                // Note: if code challenge methods are explicitly listed in the client registration, only use
+                // the code challenge methods that are both listed and enabled in the global client options.
+                // Otherwise, always default to the code challenge methods that have been enabled globally.
+                SupportedClientCodeChallengeMethods: context.Registration.CodeChallengeMethods.Count switch
+                {
+                    0 => context.Options.CodeChallengeMethods as ICollection<string>,
+                    _ => context.Options.CodeChallengeMethods
+                        .Intersect(context.Registration.CodeChallengeMethods, StringComparer.Ordinal)
+                        .ToList(),
+                },
+
+                SupportedServerCodeChallengeMethods: context.Configuration.CodeChallengeMethodsSupported) switch
             {
-                // If neither the client nor the server specify a list of code challenge methods, don't use PKCE.
-                ({ Count: 0 }, { Count: 0 }) => null,
+                // If the list of code challenge methods supported by the
+                // client is empty, don't use Proof Key for Code Exchange.
+                ({ Count: 0 }, { Count: _ }) => null,
 
-                // If the server doesn't specify a list of code challenge methods, don't use PKCE.
+                // If the server doesn't specify a list of code challenge methods,
+                // Proof Key for Code Exchange is assumed to be unsupported.
                 ({ Count: > 0 }, { Count: 0 }) => null,
-
-                // If the client doesn't specify a list of code challenge methods but the server support S256, use it.
-                ({ Count: 0 }, { Count: > 0 } server) when server.Contains(CodeChallengeMethods.Sha256)
-                    => CodeChallengeMethods.Sha256,
 
                 // If both the client and the server support S256, use it.
                 ({ Count: > 0 } client, { Count: > 0 } server) when
                     client.Contains(CodeChallengeMethods.Sha256) && server.Contains(CodeChallengeMethods.Sha256)
                     => CodeChallengeMethods.Sha256,
-
-                // If the client doesn't specify a list of code challenge methods but the server support plain, use it.
-                ({ Count: 0 }, { Count: > 0 } server) when server.Contains(CodeChallengeMethods.Plain)
-                    => CodeChallengeMethods.Plain,
 
                 // If both the client and the server support plain, use it.
                 ({ Count: > 0 } client, { Count: > 0 } server) when
@@ -4099,35 +4271,29 @@ public static partial class OpenIddictClientHandlers
 
             // Note: while enforced by OAuth 2.1 under certain circumstances, PKCE is not a required feature for
             // OAuth 2.0 and OpenID Connect (where features like nonce validation can serve similar purposes).
-            // As such, no error is returned at this stage is no common code challenge method could be inferred.
+            // As such, no error is returned at this stage if no common code challenge method could be inferred.
             if (string.IsNullOrEmpty(context.CodeChallengeMethod))
             {
                 return default;
             }
 
             // Generate a new crypto-secure random identifier that will be used as the code challenge.
-            var data = new byte[256 / 8];
-#if SUPPORTS_STATIC_RANDOM_NUMBER_GENERATOR_METHODS
-            RandomNumberGenerator.Fill(data);
-#else
-            using var generator = RandomNumberGenerator.Create();
-            generator.GetBytes(data);
-#endif
-            context.CodeVerifier = Base64UrlEncoder.Encode(data);
+            context.CodeVerifier = Base64UrlEncoder.Encode(OpenIddictHelpers.CreateRandomArray(size: 256));
 
-            if (context.CodeChallengeMethod is CodeChallengeMethods.Plain)
+            context.CodeChallenge = context.CodeChallengeMethod switch
             {
-                // Use the code verifier as the code challenge.
-                context.CodeChallenge = context.CodeVerifier;
-            }
+                // For "plain", use the code verifier as the code challenge.
+                CodeChallengeMethods.Plain => context.CodeVerifier,
 
-            else if (context.CodeChallengeMethod is CodeChallengeMethods.Sha256)
-            {
-                // Compute of the SHA-256 hash of the code verifier and use it as the code challenge.
-                using var algorithm = SHA256.Create();
-                context.CodeChallenge = Base64UrlEncoder.Encode(algorithm.ComputeHash(
-                    Encoding.ASCII.GetBytes(context.CodeVerifier)));
-            }
+                // For S256, compute the SHA-256 hash of the code verifier and use it as the code challenge.
+                //
+                // Note: ASCII is deliberately used here, as it's the encoding required by the specification.
+                // For more information, see https://datatracker.ietf.org/doc/html/rfc7636#section-4.2.
+                CodeChallengeMethods.Sha256 => Base64UrlEncoder.Encode(
+                    OpenIddictHelpers.ComputeSha256Hash(Encoding.ASCII.GetBytes(context.CodeVerifier))),
+
+                _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0045))
+            };
 
             return default;
         }
@@ -4137,7 +4303,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for preparing and attaching the claims principal
     /// used to generate the state token, if one is going to be returned.
     /// </summary>
-    public class PrepareStateTokenPrincipal : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class PrepareStateTokenPrincipal : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4235,6 +4401,9 @@ public static partial class OpenIddictClientHandlers
 
             // Store the nonce in the state token so it can be later used to check whether
             // the nonce extracted from the identity token matches the generated value.
+            //
+            // Note: the nonce is also used by the ASP.NET Core and OWIN hosts as a way
+            // to uniquely identify the name of the correlation cookie used for antiforgery.
             principal.SetClaim(Claims.Private.Nonce, context.Nonce);
 
             // Store the requested scopes in the state token.
@@ -4249,7 +4418,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for generating a state token for the current challenge operation.
     /// </summary>
-    public class GenerateStateToken : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class GenerateStateToken : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -4315,7 +4484,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for ensuring the redirect_uri parameter is present
     /// if the "openid" scope is requested (indicating the request is an OpenID Connect request).
     /// </summary>
-    public class ValidateRedirectUriParameter : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class ValidateRedirectUriParameter : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4350,7 +4519,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the appropriate parameters to the challenge response.
     /// </summary>
-    public class AttachChallengeParameters : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachChallengeParameters : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4387,7 +4556,20 @@ public static partial class OpenIddictClientHandlers
                 context.Request.Scope = string.Join(" ", context.Scopes);
             }
 
-            context.Request.Nonce = context.Nonce;
+            // If a nonce was generated and the request is an OpenID Connect request where an authorization
+            // code or an identity token are expected to be returned as part of the authorization response,
+            // attach the nonce as a parameter. Otherwise, don't include it to avoid potential rejections.
+            //
+            // Note: the nonce is always hashed before being sent, as recommended the specification.
+            // See https://openid.net/specs/openid-connect-core-1_0.html#NonceNotes for more information.
+            if (context.Scopes.Contains(Scopes.OpenId) && !string.IsNullOrEmpty(context.Nonce) && 
+                context.ResponseType?.Split(Separators.Space) is IList<string> types &&
+                (types.Contains(ResponseTypes.Code) || types.Contains(ResponseTypes.IdToken)))
+            {
+                context.Request.Nonce = Base64UrlEncoder.Encode(
+                    OpenIddictHelpers.ComputeSha256Hash(Encoding.UTF8.GetBytes(context.Nonce)));
+            }
+
             context.Request.CodeChallenge = context.CodeChallenge;
             context.Request.CodeChallengeMethod = context.CodeChallengeMethod;
 
@@ -4407,7 +4589,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for attaching the parameters
     /// populated from user-defined handlers to the challenge response.
     /// </summary>
-    public class AttachCustomChallengeParameters : IOpenIddictClientHandler<ProcessChallengeContext>
+    public sealed class AttachCustomChallengeParameters : IOpenIddictClientHandler<ProcessChallengeContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4443,7 +4625,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for ensuring that the sign-out demand
     /// is compatible with the type of the endpoint that handled the request.
     /// </summary>
-    public class ValidateSignOutDemand : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class ValidateSignOutDemand : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4468,6 +4650,43 @@ public static partial class OpenIddictClientHandlers
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0024));
             }
 
+            // Ensure signing/and encryption credentials are present as they are required to protect state tokens.
+            if (context.Options.EncryptionCredentials.Count is 0)
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0357));
+            }
+
+            if (context.Options.SigningCredentials.Count is 0)
+            {
+                throw new InvalidOperationException(SR.GetResourceString(SR.ID0358));
+            }
+
+            // If a provider name was specified, resolve the corresponding issuer.
+            if (!string.IsNullOrEmpty(context.ProviderName))
+            {
+                var registration = context.Options.Registrations.Find(registration => string.Equals(
+                    registration.ProviderName, context.ProviderName, StringComparison.Ordinal)) ??
+                    throw new InvalidOperationException(SR.GetResourceString(SR.ID0348));
+
+                // If an explicit issuer was also attached, ensure the two values point to the same instance.
+                if (context.Issuer is not null && context.Issuer != registration.Issuer)
+                {
+                    throw new InvalidOperationException(SR.GetResourceString(SR.ID0349));
+                }
+
+                context.Issuer = registration.Issuer;
+            }
+
+            // If no issuer was explicitly attached and a single client is registered, use it.
+            // Otherwise, throw an exception to indicate that setting an explicit issuer
+            // is required when multiple clients are registered.
+            context.Issuer ??= context.Options.Registrations.Count switch
+            {
+                0 => throw new InvalidOperationException(SR.GetResourceString(SR.ID0304)),
+                1 => context.Options.Registrations[0].Issuer,
+                _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0341))
+            };
+
             return default;
         }
     }
@@ -4475,7 +4694,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for resolving the client registration applicable to the sign-out demand.
     /// </summary>
-    public class ResolveClientRegistrationFromSignOutContext : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class ResolveClientRegistrationFromSignOutContext : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4498,28 +4717,26 @@ public static partial class OpenIddictClientHandlers
             // Note: if the static registration cannot be found in the options, this may indicate
             // the client was removed after the authorization dance started and thus, can no longer
             // be used to authenticate users. In this case, throw an exception to abort the flow.
-            context.Registration = context.Options.Registrations.Find(
+            context.Registration ??= context.Options.Registrations.Find(
                 registration => registration.Issuer == context.Issuer) ??
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0292));
 
-            // Resolve and attach the server configuration to the context.
-            var configuration = await context.Registration.ConfigurationManager.GetConfigurationAsync(default) ??
+            // Resolve and attach the server configuration to the context if none has been set already.
+            context.Configuration ??= await context.Registration.ConfigurationManager.GetConfigurationAsync(default) ??
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0140));
 
             // Ensure the issuer resolved from the configuration matches the expected value.
-            if (configuration.Issuer != context.Issuer)
+            if (context.Configuration.Issuer != context.Issuer)
             {
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0307));
             }
-
-            context.Configuration = configuration;
         }
     }
 
     /// <summary>
     /// Contains the logic responsible for attaching the client identifier to the sign-out request.
     /// </summary>
-    public class AttachOptionalClientId : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class AttachOptionalClientId : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4548,7 +4765,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the post_logout_redirect_uri to the sign-out request.
     /// </summary>
-    public class AttachPostLogoutRedirectUri : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class AttachPostLogoutRedirectUri : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4578,7 +4795,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for selecting the token types that
     /// should be generated and optionally returned in the response.
     /// </summary>
-    public class EvaluateGeneratedLogoutTokens : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class EvaluateGeneratedLogoutTokens : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4605,9 +4822,40 @@ public static partial class OpenIddictClientHandlers
     }
 
     /// <summary>
-    /// Contains the logic responsible for attaching a request forgery protection to the authorization request.
+    /// Contains the logic responsible for attaching the user-defined properties to the authentication principal.
     /// </summary>
-    public class AttachLogoutRequestForgeryProtection : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class AttachSignOutHostProperties : IOpenIddictClientHandler<ProcessSignOutContext>
+    {
+        /// <summary>
+        /// Gets the default descriptor definition assigned to this handler.
+        /// </summary>
+        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
+            = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessSignOutContext>()
+                .UseSingletonHandler<AttachSignOutHostProperties>()
+                .SetOrder(EvaluateGeneratedLogoutTokens.Descriptor.Order + 1_000)
+                .SetType(OpenIddictClientHandlerType.BuiltIn)
+                .Build();
+
+        /// <inheritdoc/>
+        public ValueTask HandleAsync(ProcessSignOutContext context)
+        {
+            if (context is null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            Debug.Assert(context.Principal is { Identity: ClaimsIdentity }, SR.GetResourceString(SR.ID4006));
+
+            context.Principal.SetClaim(Claims.Private.HostProperties, context.Properties);
+
+            return default;
+        }
+    }
+
+    /// <summary>
+    /// Contains the logic responsible for attaching a request forgery protection to the logout request.
+    /// </summary>
+    public sealed class AttachLogoutRequestForgeryProtection : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4615,7 +4863,7 @@ public static partial class OpenIddictClientHandlers
         public static OpenIddictClientHandlerDescriptor Descriptor { get; }
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessSignOutContext>()
                 .UseSingletonHandler<AttachLogoutRequestForgeryProtection>()
-                .SetOrder(EvaluateGeneratedLogoutTokens.Descriptor.Order + 1_000)
+                .SetOrder(AttachSignOutHostProperties.Descriptor.Order + 1_000)
                 .Build();
 
         /// <inheritdoc/>
@@ -4628,14 +4876,37 @@ public static partial class OpenIddictClientHandlers
 
             // Generate a new crypto-secure random identifier that will
             // be used as the non-guessable part of the state token.
-            var data = new byte[256 / 8];
-#if SUPPORTS_STATIC_RANDOM_NUMBER_GENERATOR_METHODS
-            RandomNumberGenerator.Fill(data);
-#else
-            using var generator = RandomNumberGenerator.Create();
-            generator.GetBytes(data);
-#endif
-            context.RequestForgeryProtection = Base64UrlEncoder.Encode(data);
+            context.RequestForgeryProtection = Base64UrlEncoder.Encode(
+                OpenIddictHelpers.CreateRandomArray(size: 256));
+
+            return default;
+        }
+    }
+
+    /// <summary>
+    /// Contains the logic responsible for attaching a nonce to the logout request.
+    /// </summary>
+    public sealed class AttachLogoutNonce : IOpenIddictClientHandler<ProcessSignOutContext>
+    {
+        /// <summary>
+        /// Gets the default descriptor definition assigned to this handler.
+        /// </summary>
+        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
+            = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessSignOutContext>()
+                .UseSingletonHandler<AttachLogoutNonce>()
+                .SetOrder(AttachLogoutRequestForgeryProtection.Descriptor.Order + 1_000)
+                .Build();
+
+        /// <inheritdoc/>
+        public ValueTask HandleAsync(ProcessSignOutContext context)
+        {
+            if (context is null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            // Generate a new crypto-secure random identifier that will be used as the nonce.
+            context.Nonce = Base64UrlEncoder.Encode(OpenIddictHelpers.CreateRandomArray(size: 256));
 
             return default;
         }
@@ -4645,7 +4916,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for preparing and attaching the claims principal
     /// used to generate the logout state token, if one is going to be returned.
     /// </summary>
-    public class PrepareLogoutStateTokenPrincipal : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class PrepareLogoutStateTokenPrincipal : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4654,7 +4925,7 @@ public static partial class OpenIddictClientHandlers
             = OpenIddictClientHandlerDescriptor.CreateBuilder<ProcessSignOutContext>()
                 .AddFilter<RequireLogoutStateTokenGenerated>()
                 .UseSingletonHandler<PrepareLogoutStateTokenPrincipal>()
-                .SetOrder(AttachLogoutRequestForgeryProtection.Descriptor.Order + 1_000)
+                .SetOrder(AttachLogoutNonce.Descriptor.Order + 1_000)
                 .SetType(OpenIddictClientHandlerType.BuiltIn)
                 .Build();
 
@@ -4710,7 +4981,7 @@ public static partial class OpenIddictClientHandlers
             principal.SetClaim(Claims.AuthorizationServer, context.Issuer.AbsoluteUri);
 
             // Store the request forgery protection in the state token so it can be later used to
-            // ensure the authorization response sent to the redirection endpoint is not forged.
+            // ensure the logout response sent to the post-logout redirection endpoint is not forged.
             principal.SetClaim(Claims.RequestForgeryProtection, context.RequestForgeryProtection);
 
             // Store the optional return URL in the state token.
@@ -4724,6 +4995,12 @@ public static partial class OpenIddictClientHandlers
             // Store the post_logout_redirect_uri to allow comparing to the actual redirection URL.
             principal.SetClaim(Claims.Private.PostLogoutRedirectUri, context.PostLogoutRedirectUri);
 
+            // Store the nonce in the state token.
+            //
+            // Note: the nonce is also used by the ASP.NET Core and OWIN hosts as a way
+            // to uniquely identify the name of the correlation cookie used for antiforgery.
+            principal.SetClaim(Claims.Private.Nonce, context.Nonce);
+
             context.StateTokenPrincipal = principal;
 
             return default;
@@ -4733,7 +5010,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for generating a logout state token for the current sign-out operation.
     /// </summary>
-    public class GenerateLogoutStateToken : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class GenerateLogoutStateToken : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         private readonly IOpenIddictClientDispatcher _dispatcher;
 
@@ -4798,7 +5075,7 @@ public static partial class OpenIddictClientHandlers
     /// <summary>
     /// Contains the logic responsible for attaching the appropriate parameters to the sign-out response.
     /// </summary>
-    public class AttachSignOutParameters : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class AttachSignOutParameters : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4841,7 +5118,7 @@ public static partial class OpenIddictClientHandlers
     /// Contains the logic responsible for attaching the parameters
     /// populated from user-defined handlers to the sign-out response.
     /// </summary>
-    public class AttachCustomSignOutParameters : IOpenIddictClientHandler<ProcessSignOutContext>
+    public sealed class AttachCustomSignOutParameters : IOpenIddictClientHandler<ProcessSignOutContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.
@@ -4874,46 +5151,9 @@ public static partial class OpenIddictClientHandlers
     }
 
     /// <summary>
-    /// Contains the logic responsible for extracting potential errors from the response.
-    /// </summary>
-    public class HandleErrorResponse<TContext> : IOpenIddictClientHandler<TContext> where TContext : BaseValidatingContext
-    {
-        /// <summary>
-        /// Gets the default descriptor definition assigned to this handler.
-        /// </summary>
-        public static OpenIddictClientHandlerDescriptor Descriptor { get; }
-            = OpenIddictClientHandlerDescriptor.CreateBuilder<TContext>()
-                .UseSingletonHandler<HandleErrorResponse<TContext>>()
-                .SetOrder(int.MinValue + 100_000)
-                .SetType(OpenIddictClientHandlerType.BuiltIn)
-                .Build();
-
-        /// <inheritdoc/>
-        public ValueTask HandleAsync(TContext context)
-        {
-            if (context is null)
-            {
-                throw new ArgumentNullException(nameof(context));
-            }
-
-            if (!string.IsNullOrEmpty(context.Transaction.Response?.Error))
-            {
-                context.Reject(
-                    error: context.Transaction.Response.Error,
-                    description: context.Transaction.Response.ErrorDescription,
-                    uri: context.Transaction.Response.ErrorUri);
-
-                return default;
-            }
-
-            return default;
-        }
-    }
-
-    /// <summary>
     /// Contains the logic responsible for attaching the appropriate parameters to the error response.
     /// </summary>
-    public class AttachErrorParameters : IOpenIddictClientHandler<ProcessErrorContext>
+    public sealed class AttachErrorParameters : IOpenIddictClientHandler<ProcessErrorContext>
     {
         /// <summary>
         /// Gets the default descriptor definition assigned to this handler.

@@ -21,7 +21,7 @@ public static class OpenIddictClientAspNetCoreExtensions
     /// </summary>
     /// <param name="builder">The services builder used by OpenIddict to register new services.</param>
     /// <remarks>This extension can be safely called multiple times.</remarks>
-    /// <returns>The <see cref="OpenIddictClientAspNetCoreBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientAspNetCoreBuilder"/> instance.</returns>
     public static OpenIddictClientAspNetCoreBuilder UseAspNetCore(this OpenIddictClientBuilder builder)
     {
         if (builder is null)
@@ -43,6 +43,7 @@ public static class OpenIddictClientAspNetCoreExtensions
         builder.Services.TryAddSingleton<RequirePostLogoutRedirectionEndpointPassthroughEnabled>();
         builder.Services.TryAddSingleton<RequireRedirectionEndpointPassthroughEnabled>();
         builder.Services.TryAddSingleton<RequireStatusCodePagesIntegrationEnabled>();
+        builder.Services.TryAddSingleton<RequireTransportSecurityRequirementEnabled>();
 
         // Register the option initializer used by the OpenIddict ASP.NET Core client integration services.
         // Note: TryAddEnumerable() is used here to ensure the initializers are only registered once.
@@ -63,7 +64,7 @@ public static class OpenIddictClientAspNetCoreExtensions
     /// <param name="builder">The services builder used by OpenIddict to register new services.</param>
     /// <param name="configuration">The configuration delegate used to configure the client services.</param>
     /// <remarks>This extension can be safely called multiple times.</remarks>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public static OpenIddictClientBuilder UseAspNetCore(
         this OpenIddictClientBuilder builder, Action<OpenIddictClientAspNetCoreBuilder> configuration)
     {

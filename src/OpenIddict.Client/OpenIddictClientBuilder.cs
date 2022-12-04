@@ -13,13 +13,14 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
 using OpenIddict.Client;
+using OpenIddict.Extensions;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
 /// Exposes the necessary methods required to configure the OpenIddict client services.
 /// </summary>
-public class OpenIddictClientBuilder
+public sealed class OpenIddictClientBuilder
 {
     /// <summary>
     /// Initializes a new instance of <see cref="OpenIddictClientBuilder"/>.
@@ -39,7 +40,7 @@ public class OpenIddictClientBuilder
     /// </summary>
     /// <typeparam name="TContext">The event context type.</typeparam>
     /// <param name="configuration">The configuration delegate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     [EditorBrowsable(EditorBrowsableState.Advanced)]
     public OpenIddictClientBuilder AddEventHandler<TContext>(
         Action<OpenIddictClientHandlerDescriptor.Builder<TContext>> configuration)
@@ -63,7 +64,7 @@ public class OpenIddictClientBuilder
     /// Registers an event handler using the specified descriptor.
     /// </summary>
     /// <param name="descriptor">The handler descriptor.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     [EditorBrowsable(EditorBrowsableState.Advanced)]
     public OpenIddictClientBuilder AddEventHandler(OpenIddictClientHandlerDescriptor descriptor)
     {
@@ -82,7 +83,7 @@ public class OpenIddictClientBuilder
     /// Removes the event handler that matches the specified descriptor.
     /// </summary>
     /// <param name="descriptor">The descriptor corresponding to the handler to remove.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     [EditorBrowsable(EditorBrowsableState.Advanced)]
     public OpenIddictClientBuilder RemoveEventHandler(OpenIddictClientHandlerDescriptor descriptor)
     {
@@ -112,7 +113,7 @@ public class OpenIddictClientBuilder
     /// </summary>
     /// <param name="configuration">The delegate used to configure the OpenIddict options.</param>
     /// <remarks>This extension can be safely called multiple times.</remarks>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder Configure(Action<OpenIddictClientOptions> configuration)
     {
         if (configuration is null)
@@ -129,7 +130,7 @@ public class OpenIddictClientBuilder
     /// Registers encryption credentials.
     /// </summary>
     /// <param name="credentials">The encrypting credentials.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCredentials(EncryptingCredentials credentials)
     {
         if (credentials is null)
@@ -144,7 +145,7 @@ public class OpenIddictClientBuilder
     /// Registers an encryption key.
     /// </summary>
     /// <param name="key">The security key.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionKey(SecurityKey key)
     {
         if (key is null)
@@ -182,7 +183,7 @@ public class OpenIddictClientBuilder
     /// <summary>
     /// Registers (and generates if necessary) a user-specific development encryption certificate.
     /// </summary>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddDevelopmentEncryptionCertificate()
         => AddDevelopmentEncryptionCertificate(new X500DistinguishedName("CN=OpenIddict Client Encryption Certificate"));
 
@@ -190,9 +191,7 @@ public class OpenIddictClientBuilder
     /// Registers (and generates if necessary) a user-specific development encryption certificate.
     /// </summary>
     /// <param name="subject">The subject name associated with the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-        Justification = "The X.509 certificate is attached to the client options.")]
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddDevelopmentEncryptionCertificate(X500DistinguishedName subject)
     {
         if (subject is null)
@@ -209,10 +208,10 @@ public class OpenIddictClientBuilder
             .OfType<X509Certificate2>()
             .ToList();
 
-        if (!certificates.Any(certificate => certificate.NotBefore < DateTime.Now && certificate.NotAfter > DateTime.Now))
+        if (!certificates.Exists(static certificate => certificate.NotBefore < DateTime.Now && certificate.NotAfter > DateTime.Now))
         {
 #if SUPPORTS_CERTIFICATE_GENERATION
-            using var algorithm = RSA.Create(keySizeInBits: 2048);
+            using var algorithm = OpenIddictHelpers.CreateRsaKey(size: 2048);
 
             var request = new CertificateRequest(subject, algorithm, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
             request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyEncipherment, critical: true));
@@ -269,7 +268,7 @@ public class OpenIddictClientBuilder
     /// automatically invalidated. This method should only be used during development.
     /// On production, using a X.509 certificate stored in the machine store is recommended.
     /// </summary>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEphemeralEncryptionKey()
         => AddEphemeralEncryptionKey(SecurityAlgorithms.RsaOAEP);
 
@@ -280,7 +279,7 @@ public class OpenIddictClientBuilder
     /// On production, using a X.509 certificate stored in the machine store is recommended.
     /// </summary>
     /// <param name="algorithm">The algorithm associated with the encryption key.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEphemeralEncryptionKey(string algorithm)
     {
         if (string.IsNullOrEmpty(algorithm))
@@ -291,69 +290,25 @@ public class OpenIddictClientBuilder
         return algorithm switch
         {
             SecurityAlgorithms.Aes256KW
-                => AddEncryptionCredentials(new EncryptingCredentials(CreateSymmetricSecurityKey(256),
+                => AddEncryptionCredentials(new EncryptingCredentials(
+                    new SymmetricSecurityKey(OpenIddictHelpers.CreateRandomArray(size: 256)),
                     algorithm, SecurityAlgorithms.Aes256CbcHmacSha512)),
 
             SecurityAlgorithms.RsaOAEP or
             SecurityAlgorithms.RsaOaepKeyWrap
-                => AddEncryptionCredentials(new EncryptingCredentials(CreateRsaSecurityKey(2048),
+                => AddEncryptionCredentials(new EncryptingCredentials(
+                    new RsaSecurityKey(OpenIddictHelpers.CreateRsaKey(size: 2048)),
                     algorithm, SecurityAlgorithms.Aes256CbcHmacSha512)),
 
             _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0058))
         };
-
-        static SymmetricSecurityKey CreateSymmetricSecurityKey(int size)
-        {
-            var data = new byte[size / 8];
-
-#if SUPPORTS_STATIC_RANDOM_NUMBER_GENERATOR_METHODS
-            RandomNumberGenerator.Fill(data);
-#else
-            using var generator = RandomNumberGenerator.Create();
-            generator.GetBytes(data);
-#endif
-
-            return new SymmetricSecurityKey(data);
-        }
-
-        [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-            Justification = "The generated RSA key is attached to the client options.")]
-        static RsaSecurityKey CreateRsaSecurityKey(int size)
-        {
-#if SUPPORTS_DIRECT_KEY_CREATION_WITH_SPECIFIED_SIZE
-            return new RsaSecurityKey(RSA.Create(size));
-#else
-            // Note: a 1024-bit key might be returned by RSA.Create() on .NET Desktop/Mono,
-            // where RSACryptoServiceProvider is still the default implementation and
-            // where custom implementations can be registered via CryptoConfig.
-            // To ensure the key size is always acceptable, replace it if necessary.
-            var algorithm = RSA.Create();
-            if (algorithm.KeySize < size)
-            {
-                algorithm.KeySize = size;
-            }
-
-            if (algorithm.KeySize < size && algorithm is RSACryptoServiceProvider)
-            {
-                algorithm.Dispose();
-                algorithm = new RSACryptoServiceProvider(size);
-            }
-
-            if (algorithm.KeySize < size)
-            {
-                throw new InvalidOperationException(SR.GetResourceString(SR.ID0059));
-            }
-
-            return new RsaSecurityKey(algorithm);
-#endif
-        }
     }
 
     /// <summary>
     /// Registers an encryption certificate.
     /// </summary>
     /// <param name="certificate">The encryption certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCertificate(X509Certificate2 certificate)
     {
         if (certificate is null)
@@ -366,7 +321,8 @@ public class OpenIddictClientBuilder
         if (certificate.Version >= 3)
         {
             var extensions = certificate.Extensions.OfType<X509KeyUsageExtension>().ToList();
-            if (extensions.Count != 0 && !extensions.Any(extension => extension.KeyUsages.HasFlag(X509KeyUsageFlags.KeyEncipherment)))
+            if (extensions.Count is not 0 && !extensions.Exists(static extension =>
+                extension.KeyUsages.HasFlag(X509KeyUsageFlags.KeyEncipherment)))
             {
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0060));
             }
@@ -386,7 +342,7 @@ public class OpenIddictClientBuilder
     /// <param name="assembly">The assembly containing the certificate.</param>
     /// <param name="resource">The name of the embedded resource.</param>
     /// <param name="password">The password used to open the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCertificate(Assembly assembly, string resource, string? password)
 #if SUPPORTS_EPHEMERAL_KEY_SETS
         // Note: ephemeral key sets are currently not supported on macOS.
@@ -404,7 +360,7 @@ public class OpenIddictClientBuilder
     /// <param name="resource">The name of the embedded resource.</param>
     /// <param name="password">The password used to open the certificate.</param>
     /// <param name="flags">An enumeration of flags indicating how and where to store the private key of the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCertificate(
         Assembly assembly, string resource,
         string? password, X509KeyStorageFlags flags)
@@ -430,7 +386,7 @@ public class OpenIddictClientBuilder
     /// </summary>
     /// <param name="stream">The stream containing the certificate.</param>
     /// <param name="password">The password used to open the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCertificate(Stream stream, string? password)
 #if SUPPORTS_EPHEMERAL_KEY_SETS
         // Note: ephemeral key sets are currently not supported on macOS.
@@ -450,9 +406,7 @@ public class OpenIddictClientBuilder
     /// An enumeration of flags indicating how and where
     /// to store the private key of the certificate.
     /// </param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-        Justification = "The X.509 certificate is attached to the client options.")]
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCertificate(Stream stream, string? password, X509KeyStorageFlags flags)
     {
         if (stream is null)
@@ -470,7 +424,7 @@ public class OpenIddictClientBuilder
     /// Registers an encryption certificate retrieved from the X.509 user or machine store.
     /// </summary>
     /// <param name="thumbprint">The thumbprint of the certificate used to identify it in the X.509 store.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCertificate(string thumbprint)
     {
         if (string.IsNullOrEmpty(thumbprint))
@@ -500,7 +454,7 @@ public class OpenIddictClientBuilder
     /// <param name="thumbprint">The thumbprint of the certificate used to identify it in the X.509 store.</param>
     /// <param name="name">The name of the X.509 store.</param>
     /// <param name="location">The location of the X.509 store.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEncryptionCertificate(string thumbprint, StoreName name, StoreLocation location)
     {
         if (string.IsNullOrEmpty(thumbprint))
@@ -521,7 +475,7 @@ public class OpenIddictClientBuilder
     /// Registers signing credentials.
     /// </summary>
     /// <param name="credentials">The signing credentials.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCredentials(SigningCredentials credentials)
     {
         if (credentials is null)
@@ -536,7 +490,7 @@ public class OpenIddictClientBuilder
     /// Registers a signing key.
     /// </summary>
     /// <param name="key">The security key.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningKey(SecurityKey key)
     {
         if (key is null)
@@ -592,7 +546,7 @@ public class OpenIddictClientBuilder
     /// <summary>
     /// Registers (and generates if necessary) a user-specific development signing certificate.
     /// </summary>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddDevelopmentSigningCertificate()
         => AddDevelopmentSigningCertificate(new X500DistinguishedName("CN=OpenIddict Client Signing Certificate"));
 
@@ -600,9 +554,7 @@ public class OpenIddictClientBuilder
     /// Registers (and generates if necessary) a user-specific development signing certificate.
     /// </summary>
     /// <param name="subject">The subject name associated with the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-        Justification = "The X.509 certificate is attached to the client options.")]
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddDevelopmentSigningCertificate(X500DistinguishedName subject)
     {
         if (subject is null)
@@ -619,10 +571,10 @@ public class OpenIddictClientBuilder
             .OfType<X509Certificate2>()
             .ToList();
 
-        if (!certificates.Any(certificate => certificate.NotBefore < DateTime.Now && certificate.NotAfter > DateTime.Now))
+        if (!certificates.Exists(static certificate => certificate.NotBefore < DateTime.Now && certificate.NotAfter > DateTime.Now))
         {
 #if SUPPORTS_CERTIFICATE_GENERATION
-            using var algorithm = RSA.Create(keySizeInBits: 2048);
+            using var algorithm = OpenIddictHelpers.CreateRsaKey(size: 2048);
 
             var request = new CertificateRequest(subject, algorithm, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
             request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, critical: true));
@@ -679,7 +631,7 @@ public class OpenIddictClientBuilder
     /// automatically invalidated. This method should only be used during development.
     /// On production, using a X.509 certificate stored in the machine store is recommended.
     /// </summary>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEphemeralSigningKey()
         => AddEphemeralSigningKey(SecurityAlgorithms.RsaSha256);
 
@@ -690,9 +642,7 @@ public class OpenIddictClientBuilder
     /// On production, using a X.509 certificate stored in the machine store is recommended.
     /// </summary>
     /// <param name="algorithm">The algorithm associated with the signing key.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-        Justification = "The X.509 certificate is attached to the client options.")]
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddEphemeralSigningKey(string algorithm)
     {
         if (string.IsNullOrEmpty(algorithm))
@@ -714,23 +664,24 @@ public class OpenIddictClientBuilder
             SecurityAlgorithms.RsaSsaPssSha256Signature or
             SecurityAlgorithms.RsaSsaPssSha384Signature or
             SecurityAlgorithms.RsaSsaPssSha512Signature
-                => AddSigningCredentials(new SigningCredentials(CreateRsaSecurityKey(2048), algorithm)),
+                => AddSigningCredentials(new SigningCredentials(new RsaSecurityKey(
+                    OpenIddictHelpers.CreateRsaKey(size: 2048)), algorithm)),
 
 #if SUPPORTS_ECDSA
             SecurityAlgorithms.EcdsaSha256 or
             SecurityAlgorithms.EcdsaSha256Signature
                 => AddSigningCredentials(new SigningCredentials(new ECDsaSecurityKey(
-                    ECDsa.Create(ECCurve.NamedCurves.nistP256)), algorithm)),
+                    OpenIddictHelpers.CreateEcdsaKey(ECCurve.NamedCurves.nistP256)), algorithm)),
 
             SecurityAlgorithms.EcdsaSha384 or
             SecurityAlgorithms.EcdsaSha384Signature
                 => AddSigningCredentials(new SigningCredentials(new ECDsaSecurityKey(
-                    ECDsa.Create(ECCurve.NamedCurves.nistP384)), algorithm)),
+                    OpenIddictHelpers.CreateEcdsaKey(ECCurve.NamedCurves.nistP384)), algorithm)),
 
             SecurityAlgorithms.EcdsaSha512 or
             SecurityAlgorithms.EcdsaSha512Signature
                 => AddSigningCredentials(new SigningCredentials(new ECDsaSecurityKey(
-                    ECDsa.Create(ECCurve.NamedCurves.nistP521)), algorithm)),
+                    OpenIddictHelpers.CreateEcdsaKey(ECCurve.NamedCurves.nistP521)), algorithm)),
 #else
             SecurityAlgorithms.EcdsaSha256 or
             SecurityAlgorithms.EcdsaSha384 or
@@ -743,45 +694,13 @@ public class OpenIddictClientBuilder
 
             _ => throw new InvalidOperationException(SR.GetResourceString(SR.ID0058))
         };
-
-        [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-            Justification = "The generated RSA key is attached to the client options.")]
-        static RsaSecurityKey CreateRsaSecurityKey(int size)
-        {
-#if SUPPORTS_DIRECT_KEY_CREATION_WITH_SPECIFIED_SIZE
-            return new RsaSecurityKey(RSA.Create(size));
-#else
-            // Note: a 1024-bit key might be returned by RSA.Create() on .NET Desktop/Mono,
-            // where RSACryptoServiceProvider is still the default implementation and
-            // where custom implementations can be registered via CryptoConfig.
-            // To ensure the key size is always acceptable, replace it if necessary.
-            var algorithm = RSA.Create();
-            if (algorithm.KeySize < size)
-            {
-                algorithm.KeySize = size;
-            }
-
-            if (algorithm.KeySize < size && algorithm is RSACryptoServiceProvider)
-            {
-                algorithm.Dispose();
-                algorithm = new RSACryptoServiceProvider(size);
-            }
-
-            if (algorithm.KeySize < size)
-            {
-                throw new InvalidOperationException(SR.GetResourceString(SR.ID0059));
-            }
-
-            return new RsaSecurityKey(algorithm);
-#endif
-        }
     }
 
     /// <summary>
     /// Registers a signing certificate.
     /// </summary>
     /// <param name="certificate">The signing certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCertificate(X509Certificate2 certificate)
     {
         if (certificate is null)
@@ -794,7 +713,8 @@ public class OpenIddictClientBuilder
         if (certificate.Version >= 3)
         {
             var extensions = certificate.Extensions.OfType<X509KeyUsageExtension>().ToList();
-            if (extensions.Count != 0 && !extensions.Any(extension => extension.KeyUsages.HasFlag(X509KeyUsageFlags.DigitalSignature)))
+            if (extensions.Count is not 0 && !extensions.Exists(static extension =>
+                extension.KeyUsages.HasFlag(X509KeyUsageFlags.DigitalSignature)))
             {
                 throw new InvalidOperationException(SR.GetResourceString(SR.ID0070));
             }
@@ -814,7 +734,7 @@ public class OpenIddictClientBuilder
     /// <param name="assembly">The assembly containing the certificate.</param>
     /// <param name="resource">The name of the embedded resource.</param>
     /// <param name="password">The password used to open the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCertificate(Assembly assembly, string resource, string? password)
 #if SUPPORTS_EPHEMERAL_KEY_SETS
         // Note: ephemeral key sets are currently not supported on macOS.
@@ -832,7 +752,7 @@ public class OpenIddictClientBuilder
     /// <param name="resource">The name of the embedded resource.</param>
     /// <param name="password">The password used to open the certificate.</param>
     /// <param name="flags">An enumeration of flags indicating how and where to store the private key of the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCertificate(
         Assembly assembly, string resource,
         string? password, X509KeyStorageFlags flags)
@@ -858,7 +778,7 @@ public class OpenIddictClientBuilder
     /// </summary>
     /// <param name="stream">The stream containing the certificate.</param>
     /// <param name="password">The password used to open the certificate.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCertificate(Stream stream, string? password)
 #if SUPPORTS_EPHEMERAL_KEY_SETS
         // Note: ephemeral key sets are currently not supported on macOS.
@@ -878,9 +798,7 @@ public class OpenIddictClientBuilder
     /// An enumeration of flags indicating how and where
     /// to store the private key of the certificate.
     /// </param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
-        Justification = "The X.509 certificate is attached to the client options.")]
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCertificate(Stream stream, string? password, X509KeyStorageFlags flags)
     {
         if (stream is null)
@@ -898,7 +816,7 @@ public class OpenIddictClientBuilder
     /// Registers a signing certificate retrieved from the X.509 user or machine store.
     /// </summary>
     /// <param name="thumbprint">The thumbprint of the certificate used to identify it in the X.509 store.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCertificate(string thumbprint)
     {
         if (string.IsNullOrEmpty(thumbprint))
@@ -928,7 +846,7 @@ public class OpenIddictClientBuilder
     /// <param name="thumbprint">The thumbprint of the certificate used to identify it in the X.509 store.</param>
     /// <param name="name">The name of the X.509 store.</param>
     /// <param name="location">The location of the X.509 store.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddSigningCertificate(string thumbprint, StoreName name, StoreLocation location)
     {
         if (string.IsNullOrEmpty(thumbprint))
@@ -949,7 +867,7 @@ public class OpenIddictClientBuilder
     /// Adds a new client registration.
     /// </summary>
     /// <param name="registration">The client registration.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder AddRegistration(OpenIddictClientRegistration registration)
     {
         if (registration is null)
@@ -966,9 +884,119 @@ public class OpenIddictClientBuilder
     /// Using this option is generally NOT recommended as it prevents
     /// the tokens from being revoked (if needed).
     /// </summary>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder DisableTokenStorage()
         => Configure(options => options.DisableTokenStorage = true);
+
+    /// <summary>
+    /// Enables authorization code flow support. For more information
+    /// about this specific OAuth 2.0/OpenID Connect flow, visit
+    /// https://tools.ietf.org/html/rfc6749#section-4.1 and
+    /// http://openid.net/specs/openid-connect-core-1_0.html#CodeFlowAuth.
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder AllowAuthorizationCodeFlow()
+        => Configure(options =>
+        {
+            options.CodeChallengeMethods.Add(CodeChallengeMethods.Sha256);
+
+            options.GrantTypes.Add(GrantTypes.AuthorizationCode);
+
+            options.ResponseModes.Add(ResponseModes.FormPost);
+            options.ResponseModes.Add(ResponseModes.Fragment);
+            options.ResponseModes.Add(ResponseModes.Query);
+
+            options.ResponseTypes.Add(ResponseTypes.Code);
+        });
+
+    /// <summary>
+    /// Enables client credentials flow support. For more information about this
+    /// specific OAuth 2.0 flow, visit https://tools.ietf.org/html/rfc6749#section-4.4.
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder AllowClientCredentialsFlow()
+        => Configure(options => options.GrantTypes.Add(GrantTypes.ClientCredentials));
+
+    /// <summary>
+    /// Enables hybrid flow support. For more information
+    /// about this specific OpenID Connect flow, visit
+    /// http://openid.net/specs/openid-connect-core-1_0.html#HybridFlowAuth.
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder AllowHybridFlow()
+        => Configure(options =>
+        {
+            options.CodeChallengeMethods.Add(CodeChallengeMethods.Sha256);
+
+            options.GrantTypes.Add(GrantTypes.AuthorizationCode);
+            options.GrantTypes.Add(GrantTypes.Implicit);
+
+            options.ResponseModes.Add(ResponseModes.FormPost);
+            options.ResponseModes.Add(ResponseModes.Fragment);
+
+            options.ResponseTypes.Add(ResponseTypes.Code + ' ' + ResponseTypes.IdToken);
+            options.ResponseTypes.Add(ResponseTypes.Code + ' ' + ResponseTypes.IdToken + ' ' + ResponseTypes.Token);
+            options.ResponseTypes.Add(ResponseTypes.Code + ' ' + ResponseTypes.Token);
+        });
+
+    /// <summary>
+    /// Enables implicit flow support. For more information
+    /// about this specific OAuth 2.0/OpenID Connect flow, visit
+    /// https://tools.ietf.org/html/rfc6749#section-4.2 and
+    /// http://openid.net/specs/openid-connect-core-1_0.html#ImplicitFlowAuth.
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder AllowImplicitFlow()
+        => Configure(options =>
+        {
+            options.GrantTypes.Add(GrantTypes.Implicit);
+
+            options.ResponseModes.Add(ResponseModes.FormPost);
+            options.ResponseModes.Add(ResponseModes.Fragment);
+
+            // Note: response_type=token is not considered secure enough as it allows malicious
+            // actors to inject access tokens that were initially issued to a different client.
+            // As such, while OpenIddict-based servers allow using response_type=token for backward
+            // compatibility with legacy clients, OpenIddict-based clients are deliberately not
+            // allowed to negotiate the unsafe and OAuth 2.0-only response_type=token flow.
+            //
+            // For more information, see https://datatracker.ietf.org/doc/html/rfc6749#section-10.16 and
+            // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics-19#section-2.1.2.
+
+            options.ResponseTypes.Add(ResponseTypes.IdToken);
+            options.ResponseTypes.Add(ResponseTypes.IdToken + ' ' + ResponseTypes.Token);
+        });
+
+    /// <summary>
+    /// Enables none flow support. For more information about this specific OAuth 2.0 flow,
+    /// visit https://openid.net/specs/oauth-v2-multiple-response-types-1_0.html#none.
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder AllowNoneFlow()
+        => Configure(options =>
+        {
+            options.ResponseModes.Add(ResponseModes.FormPost);
+            options.ResponseModes.Add(ResponseModes.Fragment);
+            options.ResponseModes.Add(ResponseModes.Query);
+
+            options.ResponseTypes.Add(ResponseTypes.None);
+        });
+
+    /// <summary>
+    /// Enables password flow support. For more information about this specific
+    /// OAuth 2.0 flow, visit https://tools.ietf.org/html/rfc6749#section-4.3.
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder AllowPasswordFlow()
+        => Configure(options => options.GrantTypes.Add(GrantTypes.Password));
+
+    /// <summary>
+    /// Enables refresh token flow support. For more information about this
+    /// specific OAuth 2.0 flow, visit https://tools.ietf.org/html/rfc6749#section-6.
+    /// </summary>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder AllowRefreshTokenFlow()
+        => Configure(options => options.GrantTypes.Add(GrantTypes.RefreshToken));
 
     /// <summary>
     /// Sets the relative or absolute URLs associated to the redirection endpoint.
@@ -981,8 +1009,9 @@ public class OpenIddictClientBuilder
     /// see https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#section-4.4.
     /// </remarks>
     /// <param name="addresses">The addresses associated to the endpoint.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
-    public OpenIddictClientBuilder SetRedirectionEndpointUris(params string[] addresses)
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder SetRedirectionEndpointUris(
+        [StringSyntax(StringSyntaxAttribute.Uri)] params string[] addresses)
     {
         if (addresses is null)
         {
@@ -1003,7 +1032,7 @@ public class OpenIddictClientBuilder
     /// see https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#section-4.4.
     /// </remarks>
     /// <param name="addresses">The addresses associated to the endpoint.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder SetRedirectionEndpointUris(params Uri[] addresses)
     {
         if (addresses is null)
@@ -1011,12 +1040,12 @@ public class OpenIddictClientBuilder
             throw new ArgumentNullException(nameof(addresses));
         }
 
-        if (addresses.Any(address => !address.IsWellFormedOriginalString()))
+        if (Array.Exists(addresses, static address => !address.IsWellFormedOriginalString()))
         {
             throw new ArgumentException(SR.GetResourceString(SR.ID0072), nameof(addresses));
         }
 
-        if (addresses.Any(address => address.OriginalString.StartsWith("~", StringComparison.OrdinalIgnoreCase)))
+        if (Array.Exists(addresses, static address => address.OriginalString.StartsWith("~", StringComparison.OrdinalIgnoreCase)))
         {
             throw new ArgumentException(SR.FormatID0081("~"), nameof(addresses));
         }
@@ -1033,8 +1062,9 @@ public class OpenIddictClientBuilder
     /// If an empty array is specified, the endpoint will be considered disabled.
     /// </summary>
     /// <param name="addresses">The addresses associated to the endpoint.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
-    public OpenIddictClientBuilder SetPostLogoutRedirectionEndpointUris(params string[] addresses)
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
+    public OpenIddictClientBuilder SetPostLogoutRedirectionEndpointUris(
+        [StringSyntax(StringSyntaxAttribute.Uri)] params string[] addresses)
     {
         if (addresses is null)
         {
@@ -1049,7 +1079,7 @@ public class OpenIddictClientBuilder
     /// If an empty array is specified, the endpoint will be considered disabled.
     /// </summary>
     /// <param name="addresses">The addresses associated to the endpoint.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder SetPostLogoutRedirectionEndpointUris(params Uri[] addresses)
     {
         if (addresses is null)
@@ -1057,12 +1087,12 @@ public class OpenIddictClientBuilder
             throw new ArgumentNullException(nameof(addresses));
         }
 
-        if (addresses.Any(address => !address.IsWellFormedOriginalString()))
+        if (Array.Exists(addresses, static address => !address.IsWellFormedOriginalString()))
         {
             throw new ArgumentException(SR.GetResourceString(SR.ID0072), nameof(addresses));
         }
 
-        if (addresses.Any(address => address.OriginalString.StartsWith("~", StringComparison.OrdinalIgnoreCase)))
+        if (Array.Exists(addresses, static address => address.OriginalString.StartsWith("~", StringComparison.OrdinalIgnoreCase)))
         {
             throw new ArgumentException(SR.FormatID0081("~"), nameof(addresses));
         }
@@ -1081,7 +1111,7 @@ public class OpenIddictClientBuilder
     /// While discouraged, <see langword="null"/> can be specified to issue tokens that never expire.
     /// </summary>
     /// <param name="lifetime">The access token lifetime.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder SetClientAssertionTokenLifetime(TimeSpan? lifetime)
         => Configure(options => options.ClientAssertionTokenLifetime = lifetime);
 
@@ -1092,29 +1122,19 @@ public class OpenIddictClientBuilder
     /// While discouraged, <see langword="null"/> can be specified to issue tokens that never expire.
     /// </summary>
     /// <param name="lifetime">The access token lifetime.</param>
-    /// <returns>The <see cref="OpenIddictClientBuilder"/>.</returns>
+    /// <returns>The <see cref="OpenIddictClientBuilder"/> instance.</returns>
     public OpenIddictClientBuilder SetStateTokenLifetime(TimeSpan? lifetime)
         => Configure(options => options.StateTokenLifetime = lifetime);
 
-    /// <summary>
-    /// Determines whether the specified object is equal to the current object.
-    /// </summary>
-    /// <param name="obj">The object to compare with the current object.</param>
-    /// <returns><see langword="true"/> if the specified object is equal to the current object; otherwise, false.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override bool Equals(object? obj) => base.Equals(obj);
 
-    /// <summary>
-    /// Serves as the default hash function.
-    /// </summary>
-    /// <returns>A hash code for the current object.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override int GetHashCode() => base.GetHashCode();
 
-    /// <summary>
-    /// Returns a string that represents the current object.
-    /// </summary>
-    /// <returns>A string that represents the current object.</returns>
+    /// <inheritdoc/>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public override string? ToString() => base.ToString();
 }

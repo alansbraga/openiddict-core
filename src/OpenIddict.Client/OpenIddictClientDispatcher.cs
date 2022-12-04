@@ -4,12 +4,14 @@
  * the license and the contributors participating to this project.
  */
 
+using System.ComponentModel;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace OpenIddict.Client;
 
-public class OpenIddictClientDispatcher : IOpenIddictClientDispatcher
+[EditorBrowsable(EditorBrowsableState.Advanced)]
+public sealed class OpenIddictClientDispatcher : IOpenIddictClientDispatcher
 {
     private readonly ILogger<OpenIddictClientDispatcher> _logger;
     private readonly IOptionsMonitor<OpenIddictClientOptions> _options;
@@ -85,7 +87,7 @@ public class OpenIddictClientDispatcher : IOpenIddictClientDispatcher
         {
             // Note: the descriptors collection is sorted during options initialization for performance reasons.
             var descriptors = _options.CurrentValue.Handlers;
-            if (descriptors.Count == 0)
+            if (descriptors.Count is 0)
             {
                 yield break;
             }

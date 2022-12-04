@@ -4,6 +4,7 @@
  * the license and the contributors participating to this project.
  */
 
+using System.Diagnostics;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Tokens;
 
@@ -12,7 +13,8 @@ namespace OpenIddict.Client;
 /// <summary>
 /// Contains the properties used to configure a client/server link.
 /// </summary>
-public class OpenIddictClientRegistration
+[DebuggerDisplay("{Issuer,nq}")]
+public sealed class OpenIddictClientRegistration
 {
     /// <summary>
     /// Gets or sets the client identifier assigned by the authorization server.
@@ -50,41 +52,41 @@ public class OpenIddictClientRegistration
 
     /// <summary>
     /// Gets the code challenge methods allowed by the client instance.
-    /// If no value is explicitly set, the default code challenge methods are automatically used.
+    /// If no value is explicitly set, all the methods enabled in the client options can be used.
     /// </summary>
     /// <remarks>
-    /// The final code challenge method used in authorization requests is chosen by OpenIddict
-    /// based on the server configuration and the values registered in this property.
+    /// The final code challenge method used in authorization requests is chosen by OpenIddict based
+    /// on the client options, the server configuration and the values registered in this property.
     /// </remarks>
     public HashSet<string> CodeChallengeMethods { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Gets the grant types allowed by the client instance.
-    /// If no value is explicitly set, the default grant types are automatically used.
+    /// If no value is explicitly set, all the modes enabled in the client options can be used.
     /// </summary>
     /// <remarks>
-    /// The final grant type used in authorization requests is chosen by OpenIddict
-    /// based on the server configuration and the values registered in this property.
+    /// The final grant type used in authorization requests is chosen by OpenIddict based on
+    /// the client options, the server configuration and the values registered in this property.
     /// </remarks>
     public HashSet<string> GrantTypes { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Gets the response type combinations allowed by the client instance.
-    /// If no value is explicitly set, the default response types are automatically used.
+    /// If no value is explicitly set, all the types enabled in the client options can be used.
     /// </summary>
     /// <remarks>
-    /// The final response type used in authorization requests is chosen by OpenIddict
-    /// based on the server configuration and the values registered in this property.
+    /// The final response type used in authorization requests is chosen by OpenIddict based on
+    /// the client options, the server configuration and the values registered in this property.
     /// </remarks>
     public HashSet<string> ResponseTypes { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Gets the response modes allowed by the client instance.
-    /// If no value is explicitly set, the default response modes are automatically used.
+    /// If no value is explicitly set, all the modes enabled in the client options can be used.
     /// </summary>
     /// <remarks>
-    /// The final response method used in authorization requests is chosen by OpenIddict
-    /// based on the server configuration and the values registered in this property.
+    /// The final response method used in authorization requests is chosen by OpenIddict based on
+    /// the client options, the server configuration and the values registered in this property.
     /// </remarks>
     public HashSet<string> ResponseModes { get; } = new(StringComparer.Ordinal);
 
@@ -92,6 +94,20 @@ public class OpenIddictClientRegistration
     /// Gets or sets the address of the authorization server.
     /// </summary>
     public Uri? Issuer { get; set; }
+
+    /// <summary>
+    /// Gets or sets the provider name, if applicable.
+    /// </summary>
+    /// <remarks>
+    /// If a Web provider integration with the same name was enabled, the
+    /// provider-specific options will be automatically imported and applied.
+    /// </remarks>
+    public string? ProviderName { get; set; }
+
+    /// <summary>
+    /// Gets or sets the provider options, if applicable.
+    /// </summary>
+    public dynamic? ProviderOptions { get; set; }
 
     /// <summary>
     /// Gets or sets the static server configuration, if applicable.

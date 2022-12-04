@@ -274,7 +274,7 @@ public class OpenIddictScopeManager<TScope> : IOpenIddictScopeManager where TSco
     public virtual IAsyncEnumerable<TScope> FindByNamesAsync(
         ImmutableArray<string> names, CancellationToken cancellationToken = default)
     {
-        if (names.Any(name => string.IsNullOrEmpty(name)))
+        if (names.Any(string.IsNullOrEmpty))
         {
             throw new ArgumentException(SR.GetResourceString(SR.ID0203), nameof(names));
         }
@@ -430,7 +430,7 @@ public class OpenIddictScopeManager<TScope> : IOpenIddictScopeManager where TSco
         }
 
         var descriptions = await Store.GetDescriptionsAsync(scope, cancellationToken);
-        if (descriptions is null || descriptions.Count == 0)
+        if (descriptions is not { Count: > 0 })
         {
             return ImmutableDictionary.Create<CultureInfo, string>();
         }
@@ -475,7 +475,7 @@ public class OpenIddictScopeManager<TScope> : IOpenIddictScopeManager where TSco
         }
 
         var names = await Store.GetDisplayNamesAsync(scope, cancellationToken);
-        if (names is null || names.Count == 0)
+        if (names is not { Count: > 0 })
         {
             return ImmutableDictionary.Create<CultureInfo, string>();
         }
@@ -744,12 +744,13 @@ public class OpenIddictScopeManager<TScope> : IOpenIddictScopeManager where TSco
 
         await foreach (var scope in FindByNamesAsync(scopes, cancellationToken))
         {
-            resources.UnionWith(await GetResourcesAsync(scope, cancellationToken));
-        }
-
-        foreach (var resource in resources)
-        {
-            yield return resource;
+            foreach (var resource in await GetResourcesAsync(scope, cancellationToken))
+            {
+                if (resources.Add(resource))
+                {
+                    yield return resource;
+                }
+            }
         }
     }
 

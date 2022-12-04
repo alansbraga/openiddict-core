@@ -23,7 +23,7 @@ public static partial class OpenIddictClientWebIntegrationHandlers
         /// <summary>
         /// Contains the logic responsible for amending the token validation parameters for the providers that require it.
         /// </summary>
-        public class AmendTokenValidationParameters : IOpenIddictClientHandler<ValidateTokenContext>
+        public sealed class AmendTokenValidationParameters : IOpenIddictClientHandler<ValidateTokenContext>
         {
             /// <summary>
             /// Gets the default descriptor definition assigned to this handler.
@@ -50,15 +50,15 @@ public static partial class OpenIddictClientWebIntegrationHandlers
                     return default;
                 }
 
-                context.TokenValidationParameters.ValidateIssuer = context.Registration.GetProviderName() switch
+                context.TokenValidationParameters.ValidateIssuer = context.Registration.ProviderName switch
                 {
                     // When the Microsoft Account provider is configured to use the "common" tenant,
                     // the returned tokens include a dynamic issuer claim corresponding to the tenant
                     // that is associated with the client application. Since the tenant cannot be
                     // inferred when targeting the common tenant instance, issuer validation is disabled.
-                    Providers.Microsoft when string.Equals(
-                        context.Registration.GetMicrosoftSettings().Tenant,
-                        "common", StringComparison.OrdinalIgnoreCase)
+                    Providers.Microsoft when
+                        context.Registration.GetMicrosoftOptions() is { Tenant: string tenant } &&
+                        string.Equals(tenant, "common", StringComparison.OrdinalIgnoreCase)
                         => false,
 
                     _ => context.TokenValidationParameters.ValidateIssuer
